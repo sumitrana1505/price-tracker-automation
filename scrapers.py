@@ -23,7 +23,7 @@ import requests
 
 from config import (
     DEFAULT_PINCODE,
-    FALLBACK_PINCODE,
+    AMAZON_PINCODES,
     REQUEST_TIMEOUT,
     DELAY_MIN,
     DELAY_MAX,
@@ -40,7 +40,7 @@ class ProductScrapedData:
     channel: str = ""
     url: str = ""
     in_stock: bool = True
-    price: Optional[int] = None
+    price: Optional[Any] = None  # int or "OOS"
     bank_offer: Optional[int] = None
     coupon: Optional[int] = 0
     rating: Optional[float] = None
@@ -400,35 +400,59 @@ class AmazonScraper:
         # 4. Extract Rating & Review Count
         self._extract_rating_and_reviews(soup, resp.text, data)
 
-        # If price missing or OOS, retry with Kolkata pincode fallback
-        avail_el = soup.find(id='availability')
-        is_oos = bool(avail_el and 'Currently unavailable' in avail_el.get_text())
+        # Check if item is out of stock or missing price
+        is_oos = self._is_out_of_stock(soup)
         if data.price is None or is_oos:
-            if self._set_pincode(soup, url, FALLBACK_PINCODE):
-                time.sleep(1)
+            logger.info(f"  [Amazon] Initial check: {'OOS' if is_oos else 'No price'}. Checking alternate pincodes...")
+            found_stock = False
+
+            for pin in AMAZON_PINCODES:
+                logger.info(f"    -> Switching to Pincode {pin}...")
+                changed = self._set_pincode(soup, url, pin)
+                if not changed:
+                    continue
+                time.sleep(1.0)
                 try:
                     if curl_requests:
                         resp_retry = self.session.get(url, headers=self.MOBILE_HEADERS, timeout=REQUEST_TIMEOUT, impersonate="safari15_5")
                     else:
                         resp_retry = self.session.get(url, headers=self.MOBILE_HEADERS, timeout=REQUEST_TIMEOUT)
+
                     if resp_retry.status_code == 200:
                         soup_retry = BeautifulSoup(resp_retry.text, 'html.parser')
                         p_retry = self._extract_price(soup_retry)
-                        if p_retry:
-                            data.price = p_retry
-                        bo_retry = self._extract_bank_offers(soup_retry, url)
-                        if bo_retry:
-                            data.bank_offer = bo_retry
-                except Exception:
-                    pass
+                        oos_retry = self._is_out_of_stock(soup_retry)
 
-        # If price was 0 or not found
-        if data.price and data.bank_offer is None:
-            # Check 5% Amazon Pay ICICI standard cashback on electronics/TVs
-            # (Matches common 5% calculation if applicable, but only if verified)
-            pass
+                        if p_retry and not oos_retry:
+                            logger.info(f"    [Amazon] IN STOCK found at Pincode {pin}! Price: Rs.{p_retry}")
+                            data.price = p_retry
+                            data.in_stock = True
+                            data.bank_offer = self._extract_bank_offers(soup_retry, url)
+                            data.coupon = self._extract_coupon(soup_retry)
+                            # Update rating if retry has it
+                            self._extract_rating_and_reviews(soup_retry, resp_retry.text, data)
+                            found_stock = True
+                            break
+                except Exception as e:
+                    logger.debug(f"    Error checking pincode {pin}: {e}")
+
+            if not found_stock:
+                logger.info(f"  [Amazon] Out of stock across all {len(AMAZON_PINCODES)} pincodes. Marked as 'OOS'.")
+                data.in_stock = False
+                data.price = "OOS"
+                data.bank_offer = None
+                data.coupon = 0
 
         return data
+
+    def _is_out_of_stock(self, soup: BeautifulSoup) -> bool:
+        """Detects whether product is explicitly marked as unavailable/out of stock"""
+        avail_el = soup.find(id='availability')
+        if avail_el:
+            txt = avail_el.get_text().lower()
+            if any(term in txt for term in ['currently unavailable', 'out of stock', "don't know when", 'unavailable']):
+                return True
+        return False
 
     def _extract_price(self, soup: BeautifulSoup) -> Optional[int]:
         cp = (soup.find(id='corePriceDisplay_mobile_feature_div') or 

@@ -206,7 +206,7 @@ class GoogleSheetPriceTrackerBrain:
             except Exception as e:
                 logger.error(f"  Scrape error on row {r}: {e}")
 
-            if scraped and scraped.price:
+            if scraped and isinstance(scraped.price, int):
                 cells_to_update.extend([
                     gspread.Cell(r, col_price, scraped.price),
                     gspread.Cell(r, col_bank, scraped.bank_offer if scraped.bank_offer else ""),
@@ -224,9 +224,20 @@ class GoogleSheetPriceTrackerBrain:
                     f"Rating: {scraped.rating} ({scraped.rating_count or 0})"
                 )
                 success_count += 1
+            elif scraped and (scraped.price == "OOS" or not scraped.in_stock):
+                cells_to_update.extend([
+                    gspread.Cell(r, col_price, "OOS"),
+                    gspread.Cell(r, col_bank, ""),
+                    gspread.Cell(r, col_coupon, 0),
+                    gspread.Cell(r, col_nep, nep_formula),
+                    gspread.Cell(r, col_rating, scraped.rating if scraped.rating else ""),
+                    gspread.Cell(r, col_rc, scraped.rating_count if scraped.rating_count else ""),
+                ])
+                logger.info(f"  [OOS] Marked as OOS across all pincodes | Rating: {scraped.rating} ({scraped.rating_count or 0})")
+                fail_count += 1
             else:
                 cells_to_update.extend([
-                    gspread.Cell(r, col_price, ""),
+                    gspread.Cell(r, col_price, "OOS"),
                     gspread.Cell(r, col_bank, ""),
                     gspread.Cell(r, col_coupon, 0),
                     gspread.Cell(r, col_nep, nep_formula),

@@ -217,7 +217,7 @@ class PriceTrackerBrain:
             except Exception as e:
                 logger.error(f"  Scrape exception on row {r}: {e}")
 
-            if scraped_data and scraped_data.price:
+            if scraped_data and isinstance(scraped_data.price, int):
                 # Write Scraped Data
                 ws.cell(r, col_price, scraped_data.price)
                 ws.cell(r, col_bank, scraped_data.bank_offer)
@@ -234,10 +234,18 @@ class PriceTrackerBrain:
                     f"Rating: {scraped_data.rating} ({scraped_data.rating_count or 0})"
                 )
                 success_count += 1
+            elif scraped_data and (scraped_data.price == "OOS" or not scraped_data.in_stock):
+                logger.info(f"  [OOS] Marked as OOS across all pincodes | Rating: {scraped_data.rating} ({scraped_data.rating_count or 0})")
+                ws.cell(r, col_price, "OOS")
+                ws.cell(r, col_bank, None)
+                ws.cell(r, col_coupon, 0)
+                ws.cell(r, col_rating, scraped_data.rating)
+                ws.cell(r, col_rc, scraped_data.rating_count)
+                fail_count += 1
             else:
                 err = scraped_data.error_msg if scraped_data else "Failed to fetch"
                 logger.warning(f"  [OOS / ERROR] {err}")
-                ws.cell(r, col_price, None)
+                ws.cell(r, col_price, "OOS")
                 ws.cell(r, col_bank, None)
                 ws.cell(r, col_coupon, 0)
                 if scraped_data:
