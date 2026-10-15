@@ -1,0 +1,65 @@
+name: Daily Cloud Price Tracker
+
+on:
+  schedule:
+    # Runs daily at 03:00 UTC (08:30 AM IST)
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      custom_date:
+        description: 'Custom Date Header (leave blank for today e.g. 16th - Oct)'
+        required: false
+        default: ''
+      test_limit:
+        description: 'Limit number of products (leave blank to run all)'
+        required: false
+        default: ''
+
+jobs:
+  track-prices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute Daily Price Tracker Brain
+        env:
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GSHEET_SPREADSHEET_ID: ${{ secrets.GSHEET_SPREADSHEET_ID }}
+          GDRIVE_FILE_ID: ${{ secrets.GDRIVE_FILE_ID }}
+        run: |
+          ARGS=""
+          if [ -n "${{ secrets.GSHEET_SPREADSHEET_ID }}" ]; then
+            ARGS="--gsheet ${{ secrets.GSHEET_SPREADSHEET_ID }}"
+          else
+            ARGS="--sync-gdrive"
+          fi
+          if [ -n "${{ github.event.inputs.custom_date }}" ]; then
+            ARGS="$ARGS --date \"${{ github.event.inputs.custom_date }}\""
+          fi
+          if [ -n "${{ github.event.inputs.test_limit }}" ]; then
+            ARGS="$ARGS --test ${{ github.event.inputs.test_limit }}"
+          fi
+          echo "Executing: python price_tracker_engine.py $ARGS"
+          python price_tracker_engine.py $ARGS
+
+      - name: Commit and Push Updated Tracker to Repo (Backup)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add "PriceTracker (6).xlsx" || true
+          git add PriceTracker*.xlsx || true
+          git diff --staged --quiet || (git commit -m "Automated price tracker update: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" && git push)

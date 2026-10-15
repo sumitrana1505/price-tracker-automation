@@ -1,0 +1,24 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Credentials and Sensitive Files (NEVER COMMIT)
+service_account.json
+credentials.json
+client_secret*.json
+token.json
+.env
+
+# Logs and runtime artifacts
+*.log
+scratch/
+test_*.xlsx
+*_test.xlsx
