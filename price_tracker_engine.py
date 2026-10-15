@@ -295,16 +295,30 @@ def main():
     parser.add_argument("--gsheet", default=None, help="Direct Google Sheet Spreadsheet ID")
     args = parser.parse_args()
 
+    # Read from CLI flags or environment variables
     spreadsheet_id = args.gsheet or os.getenv("GSHEET_SPREADSHEET_ID")
+    target_date = args.date or os.getenv("CUSTOM_DATE") or format_today_header()
+    # Strip any accidental wrapping quotes
+    target_date = target_date.strip().strip("'\"") if target_date else format_today_header()
+    
+    test_limit = args.test
+    if test_limit is None and os.getenv("TEST_LIMIT"):
+        try:
+            test_limit = int(os.getenv("TEST_LIMIT").strip())
+        except ValueError:
+            test_limit = None
+
     if spreadsheet_id:
         from gsheet_engine import GoogleSheetPriceTrackerBrain
         logger.info("=" * 60)
         logger.info("  DIRECT GOOGLE SHEETS MODE")
         logger.info(f"  Spreadsheet ID: {spreadsheet_id}")
-        logger.info(f"  Date Header: {args.date or format_today_header()}")
+        logger.info(f"  Date Header: {target_date}")
+        if test_limit:
+            logger.info(f"  Test Limit: {test_limit} products")
         logger.info("=" * 60)
-        gsheet_brain = GoogleSheetPriceTrackerBrain(spreadsheet_id=spreadsheet_id, date_header=args.date)
-        gsheet_brain.run(test_limit=args.test)
+        gsheet_brain = GoogleSheetPriceTrackerBrain(spreadsheet_id=spreadsheet_id, date_header=target_date)
+        gsheet_brain.run(test_limit=test_limit)
         return
 
     target_file = args.file or resolve_default_file()

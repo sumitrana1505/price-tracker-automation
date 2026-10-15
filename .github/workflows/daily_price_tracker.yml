@@ -40,21 +40,10 @@ jobs:
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GSHEET_SPREADSHEET_ID: ${{ secrets.GSHEET_SPREADSHEET_ID }}
           GDRIVE_FILE_ID: ${{ secrets.GDRIVE_FILE_ID }}
+          CUSTOM_DATE: ${{ github.event.inputs.custom_date }}
+          TEST_LIMIT: ${{ github.event.inputs.test_limit }}
         run: |
-          ARGS=""
-          if [ -n "${{ secrets.GSHEET_SPREADSHEET_ID }}" ]; then
-            ARGS="--gsheet ${{ secrets.GSHEET_SPREADSHEET_ID }}"
-          else
-            ARGS="--sync-gdrive"
-          fi
-          if [ -n "${{ github.event.inputs.custom_date }}" ]; then
-            ARGS="$ARGS --date \"${{ github.event.inputs.custom_date }}\""
-          fi
-          if [ -n "${{ github.event.inputs.test_limit }}" ]; then
-            ARGS="$ARGS --test ${{ github.event.inputs.test_limit }}"
-          fi
-          echo "Executing: python price_tracker_engine.py $ARGS"
-          python price_tracker_engine.py $ARGS
+          python price_tracker_engine.py
 
       - name: Commit and Push Updated Tracker to Repo (Backup)
         run: |
