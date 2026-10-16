@@ -535,8 +535,20 @@ class AmazonScraper:
         """Extracts coupon discount amount from Amazon product page"""
         detected_coupons = []
 
-        # 1. Target specific coupon and promo widgets/labels in BuyBox and PDP header
+        # 1. Direct JSON check for couponDiscountAmount (highest fidelity on Amazon)
+        if page_text:
+            for m in re.finditer(r'couponDiscountAmount[^\d]+(\d+)', page_text):
+                val = int(m.group(1))
+                if 0 < val < 100000:
+                    detected_coupons.append(val)
+
+        # 2. Twister Plus Coupons Card & Specific coupon selectors in BuyBox and PDP
         target_selectors = [
+            '#coupons-card-sub-heading-before-apply',
+            '#coupons-card-sub-heading-after-apply',
+            '[data-twister-plus-coupons-card-button]',
+            '.cc-card-couponsCard',
+            '.coupon-container',
             '#promoPriceBlockMessage_feature_div',
             '#couponsInBuybox_feature_div',
             '#couponBadge',
@@ -556,19 +568,23 @@ class AmazonScraper:
                 if txt:
                     candidate_texts.append(txt)
 
-        # 2. Check for dynamic span IDs (e.g. id="couponTextpctch...")
+        # 3. Check for dynamic span IDs (e.g. id="couponTextpctch...")
         for el in soup.find_all('span', id=re.compile(r'^couponText', re.I)):
             txt = el.get_text(' ', strip=True)
             if txt:
                 candidate_texts.append(txt)
 
-        # 3. Check for any element with class containing couponLabelText
+        # 4. Check for any element with class containing couponLabelText
         for el in soup.find_all(class_=re.compile(r'couponLabelText', re.I)):
             txt = el.get_text(' ', strip=True)
             if txt:
                 candidate_texts.append(txt)
 
         for text in candidate_texts:
+            # Skip "You pay" strings (which represent net price, not coupon amount)
+            if re.search(r'\byou pay\b', text, re.I):
+                continue
+
             # Check percentage coupon e.g. 'Apply 5% coupon'
             m_pct = re.search(r'(?:apply|save)?\s*(\d+)\s*%\s*(?:off|with)?\s*coupon', text, re.I)
             if m_pct and price:
@@ -577,8 +593,8 @@ class AmazonScraper:
                 if 0 < val < price:
                     detected_coupons.append(val)
 
-            # Check rupee amount coupon e.g. 'Apply ₹2250 coupon', '₹2250 off coupon applied'
-            m_amt = re.search(r'(?:apply|save)?\s*(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d+)?)\s*(?:off|with)?\s*coupon', text, re.I)
+            # Check rupee amount coupon e.g. 'Apply ₹2250 coupon', 'Save ₹2,000 now', '₹2,000 discount'
+            m_amt = re.search(r'(?:apply|save)?\s*(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d+)?)\s*(?:off|with|now|discount)?\s*(?:coupon)?', text, re.I)
             if m_amt:
                 amt_str = m_amt.group(1).split('.')[0]
                 val = clean_digits(amt_str)
@@ -592,7 +608,7 @@ class AmazonScraper:
                 if val and 0 < val < 100000:
                     detected_coupons.append(val)
 
-        # 4. Fallback search directly in raw HTML if soup didn't catch it
+        # 5. Fallback search directly in raw HTML if not detected yet
         if not detected_coupons and page_text:
             m_raw = re.search(r'(?:₹|Rs\.?|INR)\s*([\d,]+)\s*(?:off)?\s*coupon\s*applied', page_text, re.I)
             if m_raw:
@@ -600,7 +616,7 @@ class AmazonScraper:
                 if val and 0 < val < 100000:
                     detected_coupons.append(val)
             else:
-                m_raw2 = re.search(r'(?:apply|save)\s*(?:₹|Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)\s*coupon', page_text, re.I)
+                m_raw2 = re.search(r'(?:apply|save)\s*(?:₹|Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)\s*(?:off|with|now)?\s*coupon', page_text, re.I)
                 if m_raw2:
                     val = clean_digits(m_raw2.group(1).split('.')[0])
                     if val and 0 < val < 100000:
