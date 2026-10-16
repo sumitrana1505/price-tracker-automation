@@ -10,7 +10,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, Tuple, List, Dict, Any, Union
 
 from bs4 import BeautifulSoup
 
