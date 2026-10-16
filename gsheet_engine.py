@@ -149,26 +149,37 @@ class GoogleSheetPriceTrackerBrain:
         start_letter = col_to_letter(start_col)
         end_letter = col_to_letter(start_col + BLOCK_SIZE - 1)
 
-        # 3. Format Date Header: Merge and Center with background color
+        # 3. Format Date Header: White text, blue fill, Arial 8, Bold, Merge and Center
         try:
             ws.merge_cells(f"{start_letter}1:{end_letter}1", merge_type="MERGE_ALL")
             ws.format(f"{start_letter}1:{end_letter}1", {
                 "horizontalAlignment": "CENTER",
                 "verticalAlignment": "MIDDLE",
-                "textFormat": {"bold": True, "fontSize": 10},
-                "backgroundColor": {"red": 0.24, "green": 0.52, "blue": 0.78}
+                "textFormat": {
+                    "fontFamily": "Arial",
+                    "fontSize": 8,
+                    "bold": True,
+                    "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
+                },
+                "backgroundColor": {"red": 0.239, "green": 0.522, "blue": 0.776}
             })
-            logger.info(f"Merged and centered date header at {start_letter}1:{end_letter}1")
+            logger.info(f"Merged and centered date header at {start_letter}1:{end_letter}1 (White text, Arial 8)")
         except Exception as e:
             logger.warning(f"Note on date merge/format: {e}")
 
-        # 4. Format Sub-headers in Row 2: Center and Wrap Text
+        # 4. Format Sub-headers in Row 2: White text, blue fill, Arial 8, Bold, Center and Wrap Text
         try:
             ws.format(f"{start_letter}2:{end_letter}2", {
                 "horizontalAlignment": "CENTER",
                 "verticalAlignment": "MIDDLE",
                 "wrapStrategy": "WRAP",
-                "textFormat": {"bold": True, "fontSize": 9}
+                "textFormat": {
+                    "fontFamily": "Arial",
+                    "fontSize": 8,
+                    "bold": True,
+                    "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
+                },
+                "backgroundColor": {"red": 0.239, "green": 0.522, "blue": 0.776}
             })
         except Exception as e:
             logger.warning(f"Note on sub-headers format: {e}")
@@ -197,12 +208,17 @@ class GoogleSheetPriceTrackerBrain:
         except Exception as e:
             logger.warning(f"Note on applying borders: {e}")
 
-        # 6. Center align all data rows (Row 3 to 249)
+        # 6. Format all data rows (Row 3 to 249): Black text, Arial 8, Center aligned
         try:
             ws.format(f"{start_letter}3:{end_letter}{LAST_DATA_ROW}", {
                 "horizontalAlignment": "CENTER",
                 "verticalAlignment": "MIDDLE",
-                "textFormat": {"fontSize": 9}
+                "textFormat": {
+                    "fontFamily": "Arial",
+                    "fontSize": 8,
+                    "bold": False,
+                    "foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
+                }
             })
         except Exception as e:
             logger.warning(f"Note on data rows alignment: {e}")
