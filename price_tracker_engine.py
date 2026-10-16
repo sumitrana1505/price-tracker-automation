@@ -339,13 +339,14 @@ def main():
         except ValueError:
             test_limit = None
 
+    from config import DEFAULT_SHEETS, PRIMARY_SHEET, SECONDARY_SHEET
+
     sheet_env = os.getenv("TARGET_SHEET")
-    sheet_param = args.sheet or sheet_env or "all"
+    sheet_param = args.sheet or sheet_env or PRIMARY_SHEET
     sheet_clean = sheet_param.strip().lower()
 
-    from config import DEFAULT_SHEETS, PRIMARY_SHEET, SECONDARY_SHEET
-    if sheet_clean in ["all", "both", ""]:
-        target_sheets = DEFAULT_SHEETS
+    if sheet_clean in ["all", "both"]:
+        target_sheets = [PRIMARY_SHEET, SECONDARY_SHEET]
     elif "secondary" in sheet_clean:
         target_sheets = [SECONDARY_SHEET]
     elif "competitor" in sheet_clean or "primary" in sheet_clean:

@@ -395,7 +395,7 @@ class AmazonScraper:
         data.bank_offer = self._extract_bank_offers(soup, url, price=data.price)
 
         # 3. Extract Coupon
-        data.coupon = self._extract_coupon(soup)
+        data.coupon = self._extract_coupon(soup, price=data.price, page_text=resp.text)
 
         # 4. Extract Rating & Review Count
         self._extract_rating_and_reviews(soup, resp.text, data)
@@ -428,7 +428,7 @@ class AmazonScraper:
                             data.price = p_retry
                             data.in_stock = True
                             data.bank_offer = self._extract_bank_offers(soup_retry, url, price=p_retry)
-                            data.coupon = self._extract_coupon(soup_retry)
+                            data.coupon = self._extract_coupon(soup_retry, price=p_retry, page_text=resp_retry.text)
                             # Update rating if retry has it
                             self._extract_rating_and_reviews(soup_retry, resp_retry.text, data)
                             found_stock = True
@@ -531,15 +531,84 @@ class AmazonScraper:
 
         return None
 
-    def _extract_coupon(self, soup: BeautifulSoup) -> int:
-        coupon_div = (soup.find(id='couponBadge') or 
-                      soup.find(id='couponBadgeVpc') or 
-                      soup.find(class_='vpcButton') or 
-                      soup.find(id='unclippedCouponSection'))
-        if coupon_div:
-            amt = clean_digits(coupon_div.get_text())
-            if amt and amt < 20000:
-                return amt
+    def _extract_coupon(self, soup: BeautifulSoup, price: Optional[int] = None, page_text: Optional[str] = None) -> int:
+        """Extracts coupon discount amount from Amazon product page"""
+        detected_coupons = []
+
+        # 1. Target specific coupon and promo widgets/labels in BuyBox and PDP header
+        target_selectors = [
+            '#promoPriceBlockMessage_feature_div',
+            '#couponsInBuybox_feature_div',
+            '#couponBadge',
+            '#couponBadgeVpc',
+            '.vpcButton',
+            '#unclippedCouponSection',
+            '.couponLabelText',
+            '#pqv-price-coupon-message',
+            '.newCouponBadge',
+            '#applicable_coupons'
+        ]
+
+        candidate_texts = []
+        for selector in target_selectors:
+            for el in soup.select(selector):
+                txt = el.get_text(' ', strip=True)
+                if txt:
+                    candidate_texts.append(txt)
+
+        # 2. Check for dynamic span IDs (e.g. id="couponTextpctch...")
+        for el in soup.find_all('span', id=re.compile(r'^couponText', re.I)):
+            txt = el.get_text(' ', strip=True)
+            if txt:
+                candidate_texts.append(txt)
+
+        # 3. Check for any element with class containing couponLabelText
+        for el in soup.find_all(class_=re.compile(r'couponLabelText', re.I)):
+            txt = el.get_text(' ', strip=True)
+            if txt:
+                candidate_texts.append(txt)
+
+        for text in candidate_texts:
+            # Check percentage coupon e.g. 'Apply 5% coupon'
+            m_pct = re.search(r'(?:apply|save)?\s*(\d+)\s*%\s*(?:off|with)?\s*coupon', text, re.I)
+            if m_pct and price:
+                pct = int(m_pct.group(1))
+                val = int(round(price * pct / 100.0))
+                if 0 < val < price:
+                    detected_coupons.append(val)
+
+            # Check rupee amount coupon e.g. 'Apply ₹2250 coupon', '₹2250 off coupon applied'
+            m_amt = re.search(r'(?:apply|save)?\s*(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d+)?)\s*(?:off|with)?\s*coupon', text, re.I)
+            if m_amt:
+                amt_str = m_amt.group(1).split('.')[0]
+                val = clean_digits(amt_str)
+                if val and 0 < val < 100000:
+                    detected_coupons.append(val)
+
+            m_amt2 = re.search(r'coupon[^\d]{1,15}(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d+)?)', text, re.I)
+            if m_amt2:
+                amt_str = m_amt2.group(1).split('.')[0]
+                val = clean_digits(amt_str)
+                if val and 0 < val < 100000:
+                    detected_coupons.append(val)
+
+        # 4. Fallback search directly in raw HTML if soup didn't catch it
+        if not detected_coupons and page_text:
+            m_raw = re.search(r'(?:₹|Rs\.?|INR)\s*([\d,]+)\s*(?:off)?\s*coupon\s*applied', page_text, re.I)
+            if m_raw:
+                val = clean_digits(m_raw.group(1))
+                if val and 0 < val < 100000:
+                    detected_coupons.append(val)
+            else:
+                m_raw2 = re.search(r'(?:apply|save)\s*(?:₹|Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)\s*coupon', page_text, re.I)
+                if m_raw2:
+                    val = clean_digits(m_raw2.group(1).split('.')[0])
+                    if val and 0 < val < 100000:
+                        detected_coupons.append(val)
+
+        if detected_coupons:
+            return max(detected_coupons)
+
         return 0
 
     def _extract_rating_and_reviews(self, soup: BeautifulSoup, page_text: str, data: ProductScrapedData):

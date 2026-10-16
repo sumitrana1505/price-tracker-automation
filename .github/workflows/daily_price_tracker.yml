@@ -1,4 +1,4 @@
-name: Daily Cloud Price Tracker
+name: Competitor Price Monitoring
 
 on:
   schedule:
@@ -14,10 +14,6 @@ on:
         description: 'Limit number of products (leave blank to run all)'
         required: false
         default: ''
-      target_sheet:
-        description: 'Target Sheet ("all", "Competitor price monitoring", or "Secondary_Competitor")'
-        required: false
-        default: 'all'
 
 jobs:
   track-prices:
@@ -41,14 +37,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Execute Daily Price Tracker Brain
+      - name: Execute Competitor Price Monitoring Brain
         env:
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GSHEET_SPREADSHEET_ID: ${{ secrets.GSHEET_SPREADSHEET_ID }}
           GDRIVE_FILE_ID: ${{ secrets.GDRIVE_FILE_ID }}
           CUSTOM_DATE: ${{ github.event.inputs.custom_date }}
           TEST_LIMIT: ${{ github.event.inputs.test_limit }}
-          TARGET_SHEET: ${{ github.event.inputs.target_sheet || 'all' }}
+          TARGET_SHEET: 'Competitor price monitoring'
         run: |
           python price_tracker_engine.py
 
@@ -56,6 +52,7 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
           git add "PriceTracker (6).xlsx" || true
           git add PriceTracker*.xlsx || true
-          git diff --staged --quiet || (git commit -m "Automated price tracker update: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" && git push)
+          git diff --staged --quiet || (git commit -m "Automated price tracker update (Competitor price monitoring): $(date -u +'%Y-%m-%d %H:%M:%S UTC')" && git push origin main)
