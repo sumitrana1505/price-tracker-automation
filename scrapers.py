@@ -478,50 +478,68 @@ class AmazonScraper:
 
         return None
 
-    def _extract_bank_offers(self, soup: BeautifulSoup, url: str = "", price: Optional[int] = None) -> Optional[int]:
+    def _extract_bank_offers(self, soup: BeautifulSoup, url: str = "", price: Optional[int] = None) -> Optional[Union[int, float]]:
         """
         Extracts the maximum bank offer discount explicitly displayed
-        on the product description page (PDP) cards.
+        on the product description page (PDP) cards, excluding any coupon lines.
         """
         offers = []
 
         # 1. Mobile carousel offer cards (cardification-combo-swatch-card)
         cards = soup.find_all(class_='cardification-combo-swatch-card')
         for card in cards:
-            card_text = card.get_text(separator=' | ', strip=True)
-            # Find explicit negative discount amounts like -₹4,750, -₹3,500, -₹409.95
-            for m in re.findall(r'-\s*₹\s*([\d,]+(?:\.\d+)?)', card_text):
-                try:
-                    val = int(round(float(m.replace(',', ''))))
-                    if 0 < val < 100000:
-                        offers.append(val)
-                except ValueError:
-                    pass
+            headers = card.find_all(class_='cardification-combo-header')
+            if headers:
+                for h in headers:
+                    h_classes = h.get('class', [])
+                    h_text = h.get_text(' ', strip=True).lower()
+                    # Skip coupon items inside combo cards
+                    if any('coupon' in c.lower() for c in h_classes) or 'coupon' in h_text:
+                        continue
+                    # Skip cashback items (as established in previous fix for row 202)
+                    if any('cashback' in c.lower() for c in h_classes):
+                        continue
 
-            # Header money elements (e.g. -₹4,750)
-            money_div = card.find(class_='cardification-combo-header-money')
-            if money_div:
-                for m in re.findall(r'[\d,]+(?:\.\d+)?', money_div.get_text()):
-                    try:
-                        val = int(round(float(m.replace(',', ''))))
-                        if 0 < val < 100000:
-                            offers.append(val)
-                    except ValueError:
-                        pass
+                    money_div = h.find(class_='cardification-combo-header-money')
+                    money_text = money_div.get_text(strip=True) if money_div else h.get_text(strip=True)
+                    m = re.search(r'-\s*₹\s*([\d,]+(?:\.\d+)?)', money_text)
+                    if m:
+                        try:
+                            val = float(m.group(1).replace(',', ''))
+                            if 0 < val < 100000:
+                                offers.append(val)
+                        except ValueError:
+                            pass
+            else:
+                card_lines = card.get_text(separator='\n', strip=True).split('\n')
+                for line in card_lines:
+                    if 'coupon' in line.lower() or 'cashback' in line.lower():
+                        continue
+                    m = re.search(r'-\s*₹\s*([\d,]+(?:\.\d+)?)', line)
+                    if m:
+                        try:
+                            val = float(m.group(1).replace(',', ''))
+                            if 0 < val < 100000:
+                                offers.append(val)
+                        except ValueError:
+                            pass
 
         # 2. Check standard desktop / mobile offer widgets on PDP
         for widget in soup.find_all(class_=re.compile(r'vsx-offers|offers-items|bank-offer|sopp-card')):
             txt = widget.get_text(separator=' ', strip=True)
-            for m in re.findall(r'(?:discount of|upto|flat|off|saving).*?₹\s*([\d,]+)', txt, re.IGNORECASE):
+            if 'coupon' in txt.lower():
+                continue
+            for m in re.findall(r'(?:discount of|upto|flat|off|saving).*?₹\s*([\d,]+(?:\.\d+)?)', txt, re.IGNORECASE):
                 try:
-                    val = int(round(float(m.replace(',', ''))))
+                    val = float(m.replace(',', ''))
                     if 0 < val < 100000:
                         offers.append(val)
                 except ValueError:
                     pass
 
         if offers:
-            return max(offers)
+            max_val = max(offers)
+            return int(max_val) if max_val == int(max_val) else round(max_val, 2)
 
         # 3. Fallback: If no direct card is present but 5% Amazon Pay ICICI cashback applies
         if price and price > 1000:
