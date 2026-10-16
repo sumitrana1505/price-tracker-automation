@@ -392,7 +392,7 @@ class AmazonScraper:
         data.price = self._extract_price(soup)
 
         # 2. Extract Bank Offers / Cashback
-        data.bank_offer = self._extract_bank_offers(soup, url)
+        data.bank_offer = self._extract_bank_offers(soup, url, price=data.price)
 
         # 3. Extract Coupon
         data.coupon = self._extract_coupon(soup)
@@ -427,7 +427,7 @@ class AmazonScraper:
                             logger.info(f"    [Amazon] IN STOCK found at Pincode {pin}! Price: Rs.{p_retry}")
                             data.price = p_retry
                             data.in_stock = True
-                            data.bank_offer = self._extract_bank_offers(soup_retry, url)
+                            data.bank_offer = self._extract_bank_offers(soup_retry, url, price=p_retry)
                             data.coupon = self._extract_coupon(soup_retry)
                             # Update rating if retry has it
                             self._extract_rating_and_reviews(soup_retry, resp_retry.text, data)
@@ -478,51 +478,58 @@ class AmazonScraper:
 
         return None
 
-    def _extract_bank_offers(self, soup: BeautifulSoup, url: str) -> Optional[int]:
-        max_offer = 0
+    def _extract_bank_offers(self, soup: BeautifulSoup, url: str = "", price: Optional[int] = None) -> Optional[int]:
+        """
+        Extracts the maximum bank offer discount explicitly displayed
+        on the product description page (PDP) cards.
+        """
+        offers = []
 
-        # Mobile carousel cards
+        # 1. Mobile carousel offer cards (cardification-combo-swatch-card)
         cards = soup.find_all(class_='cardification-combo-swatch-card')
         for card in cards:
             card_text = card.get_text(separator=' | ', strip=True)
+            # Find explicit negative discount amounts like -₹4,750, -₹3,500, -₹409.95
+            for m in re.findall(r'-\s*₹\s*([\d,]+(?:\.\d+)?)', card_text):
+                try:
+                    val = int(round(float(m.replace(',', ''))))
+                    if 0 < val < 100000:
+                        offers.append(val)
+                except ValueError:
+                    pass
+
+            # Header money elements (e.g. -₹4,750)
             money_div = card.find(class_='cardification-combo-header-money')
             if money_div:
-                amt = clean_digits(money_div.get_text())
-                if amt and amt > max_offer and amt < 100000:
-                    max_offer = amt
-            else:
-                match = re.search(r'-₹\s*([\d,]+)', card_text)
-                if match:
-                    amt = clean_digits(match.group(1))
-                    if amt and amt > max_offer and amt < 100000:
-                        max_offer = amt
+                for m in re.findall(r'[\d,]+(?:\.\d+)?', money_div.get_text()):
+                    try:
+                        val = int(round(float(m.replace(',', ''))))
+                        if 0 < val < 100000:
+                            offers.append(val)
+                    except ValueError:
+                        pass
 
-        # Secondary view tab savings
-        aop_span = soup.find(lambda el: el.has_attr('data-a-secondary-view') and 'smx-AOP-secondary-view-0' in el['data-a-secondary-view'])
-        if aop_span:
-            try:
-                sec_data = json.loads(aop_span['data-a-secondary-view'])
-                if 'url' in sec_data:
-                    import html
-                    sec_url = 'https://www.amazon.in' + html.unescape(sec_data['url'])
-                    headers = {
-                        'User-Agent': self.MOBILE_HEADERS['User-Agent'],
-                        'Accept': 'text/html,*/*',
-                        'Referer': url,
-                        'X-Requested-With': 'XMLHttpRequest'
-                    }
-                    sec_res = self.session.get(sec_url, headers=headers, timeout=15)
-                    if sec_res.status_code == 200:
-                        sec_soup = BeautifulSoup(sec_res.text, 'html.parser')
-                        saving_msgs = sec_soup.find_all(class_='aop-payment-tab-saving-message')
-                        for sm in saving_msgs:
-                            amt = clean_digits(sm.get_text())
-                            if amt and amt > max_offer and amt < 100000:
-                                max_offer = amt
-            except Exception:
-                pass
+        # 2. Check standard desktop / mobile offer widgets on PDP
+        for widget in soup.find_all(class_=re.compile(r'vsx-offers|offers-items|bank-offer|sopp-card')):
+            txt = widget.get_text(separator=' ', strip=True)
+            for m in re.findall(r'(?:discount of|upto|flat|off|saving).*?₹\s*([\d,]+)', txt, re.IGNORECASE):
+                try:
+                    val = int(round(float(m.replace(',', ''))))
+                    if 0 < val < 100000:
+                        offers.append(val)
+                except ValueError:
+                    pass
 
-        return max_offer if max_offer > 0 else None
+        if offers:
+            return max(offers)
+
+        # 3. Fallback: If no direct card is present but 5% Amazon Pay ICICI cashback applies
+        if price and price > 1000:
+            page_lower = soup.get_text().lower()
+            if 'amazon pay icici' in page_lower and 'cashback' in page_lower:
+                return int(round(price * 0.05))
+
+        return None
 
     def _extract_coupon(self, soup: BeautifulSoup) -> int:
         coupon_div = (soup.find(id='couponBadge') or 
