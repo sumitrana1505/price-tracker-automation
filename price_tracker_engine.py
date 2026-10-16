@@ -101,32 +101,44 @@ class PriceTrackerBrain:
                 last_used_col = c
 
         new_start_col = last_used_col + 1
-        logger.info(f"Creating NEW column block for '{self.date_header}' at Col {new_start_col} ({get_column_letter(new_start_col)})")
+        end_col = new_start_col + BLOCK_SIZE - 1
+        logger.info(f"Creating NEW column block for '{self.date_header}' at Col {new_start_col}-{end_col} ({get_column_letter(new_start_col)}-{get_column_letter(end_col)})")
 
-        # 1. Header Row 1: Date label
+        thin_side = Side(border_style="thin", color="000000")
+        all_borders = Border(top=thin_side, bottom=thin_side, left=thin_side, right=thin_side)
+
+        # 1. Header Row 1: Date label (Merge and Center with All Borders)
+        prev_date_cell = ws.cell(1, new_start_col - BLOCK_SIZE)
+        for c in range(new_start_col, end_col + 1):
+            c_cell = ws.cell(1, c)
+            c_cell.border = all_borders
+            if prev_date_cell.fill and prev_date_cell.fill.fill_type:
+                c_cell.fill = copy.copy(prev_date_cell.fill)
+
         date_cell = ws.cell(1, new_start_col, self.date_header)
         date_cell.alignment = Alignment(horizontal="center", vertical="center")
-        date_cell.font = Font(name="Calibri", size=11, bold=True)
-        # Copy style from previous block if available
-        prev_date_cell = ws.cell(1, new_start_col - BLOCK_SIZE)
-        if prev_date_cell.fill and prev_date_cell.fill.fill_type:
-            date_cell.fill = copy.copy(prev_date_cell.fill)
+        date_cell.font = Font(name="Arial", size=9, bold=True)
 
-        # Merge cells in row 1 for the 6 columns
-        end_col = new_start_col + BLOCK_SIZE - 1
         ws.merge_cells(start_row=1, start_column=new_start_col, end_row=1, end_column=end_col)
 
-        # 2. Header Row 2: Sub-headers
+        # 2. Header Row 2: Sub-headers (Centered with All Borders)
         for i, sub in enumerate(SUB_HEADERS):
             c_idx = new_start_col + i
             sub_cell = ws.cell(2, c_idx, sub)
             sub_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            sub_cell.font = Font(name="Calibri", size=10, bold=True)
+            sub_cell.font = Font(name="Arial", size=8, bold=True)
+            sub_cell.border = all_borders
             prev_sub_cell = ws.cell(2, c_idx - BLOCK_SIZE)
             if prev_sub_cell.fill and prev_sub_cell.fill.fill_type:
                 sub_cell.fill = copy.copy(prev_sub_cell.fill)
-            if prev_sub_cell.border:
-                sub_cell.border = copy.copy(prev_sub_cell.border)
+
+        # 3. Format All Borders and Center Alignment for all data rows (Row 3 to 249)
+        for r in range(FIRST_DATA_ROW, LAST_DATA_ROW + 1):
+            for c in range(new_start_col, end_col + 1):
+                data_c = ws.cell(r, c)
+                data_c.border = all_borders
+                data_c.alignment = Alignment(horizontal="center", vertical="center")
+                data_c.font = Font(name="Arial", size=8)
 
         return new_start_col
 

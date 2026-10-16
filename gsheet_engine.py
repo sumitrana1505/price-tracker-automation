@@ -146,6 +146,67 @@ class GoogleSheetPriceTrackerBrain:
             ]
             ws.update_cells(sub_header_cells, value_input_option="USER_ENTERED")
 
+        start_letter = col_to_letter(start_col)
+        end_letter = col_to_letter(start_col + BLOCK_SIZE - 1)
+
+        # 3. Format Date Header: Merge and Center with background color
+        try:
+            ws.merge_cells(f"{start_letter}1:{end_letter}1", merge_type="MERGE_ALL")
+            ws.format(f"{start_letter}1:{end_letter}1", {
+                "horizontalAlignment": "CENTER",
+                "verticalAlignment": "MIDDLE",
+                "textFormat": {"bold": True, "fontSize": 10},
+                "backgroundColor": {"red": 0.24, "green": 0.52, "blue": 0.78}
+            })
+            logger.info(f"Merged and centered date header at {start_letter}1:{end_letter}1")
+        except Exception as e:
+            logger.warning(f"Note on date merge/format: {e}")
+
+        # 4. Format Sub-headers in Row 2: Center and Wrap Text
+        try:
+            ws.format(f"{start_letter}2:{end_letter}2", {
+                "horizontalAlignment": "CENTER",
+                "verticalAlignment": "MIDDLE",
+                "wrapStrategy": "WRAP",
+                "textFormat": {"bold": True, "fontSize": 9}
+            })
+        except Exception as e:
+            logger.warning(f"Note on sub-headers format: {e}")
+
+        # 5. Apply All Borders to the entire 6-column block (Row 1 to Row 249)
+        try:
+            border_req = {
+                "updateBorders": {
+                    "range": {
+                        "sheetId": ws.id,
+                        "startRowIndex": 0,
+                        "endRowIndex": LAST_DATA_ROW,
+                        "startColumnIndex": start_col - 1,
+                        "endColumnIndex": start_col + BLOCK_SIZE - 1,
+                    },
+                    "top": {"style": "SOLID", "width": 1, "color": {"red": 0, "green": 0, "blue": 0}},
+                    "bottom": {"style": "SOLID", "width": 1, "color": {"red": 0, "green": 0, "blue": 0}},
+                    "left": {"style": "SOLID", "width": 1, "color": {"red": 0, "green": 0, "blue": 0}},
+                    "right": {"style": "SOLID", "width": 1, "color": {"red": 0, "green": 0, "blue": 0}},
+                    "innerHorizontal": {"style": "SOLID", "width": 1, "color": {"red": 0, "green": 0, "blue": 0}},
+                    "innerVertical": {"style": "SOLID", "width": 1, "color": {"red": 0, "green": 0, "blue": 0}},
+                }
+            }
+            sh.batch_update({"requests": [border_req]})
+            logger.info(f"Applied all borders to range {start_letter}1:{end_letter}{LAST_DATA_ROW}")
+        except Exception as e:
+            logger.warning(f"Note on applying borders: {e}")
+
+        # 6. Center align all data rows (Row 3 to 249)
+        try:
+            ws.format(f"{start_letter}3:{end_letter}{LAST_DATA_ROW}", {
+                "horizontalAlignment": "CENTER",
+                "verticalAlignment": "MIDDLE",
+                "textFormat": {"fontSize": 9}
+            })
+        except Exception as e:
+            logger.warning(f"Note on data rows alignment: {e}")
+
         col_price = start_col
         col_bank = start_col + 1
         col_coupon = start_col + 2
@@ -153,7 +214,7 @@ class GoogleSheetPriceTrackerBrain:
         col_rating = start_col + 4
         col_rc = start_col + 5
 
-        col_price_letter = col_to_letter(col_price)
+        col_price_letter = start_letter
         col_bank_letter = col_to_letter(col_bank)
         col_coupon_letter = col_to_letter(col_coupon)
 
