@@ -14,6 +14,10 @@ on:
         description: 'Limit number of products (leave blank to run all)'
         required: false
         default: ''
+      target_sheet:
+        description: 'Target Sheet ("all", "Competitor price monitoring", or "Secondary_Competitor")'
+        required: false
+        default: 'all'
 
 jobs:
   track-prices:
@@ -44,6 +48,7 @@ jobs:
           GDRIVE_FILE_ID: ${{ secrets.GDRIVE_FILE_ID }}
           CUSTOM_DATE: ${{ github.event.inputs.custom_date }}
           TEST_LIMIT: ${{ github.event.inputs.test_limit }}
+          TARGET_SHEET: ${{ github.event.inputs.target_sheet || 'all' }}
         run: |
           python price_tracker_engine.py
 

@@ -94,22 +94,8 @@ class GoogleSheetPriceTrackerBrain:
         self.fk_scraper = FlipkartScraper()
         self.amz_scraper = AmazonScraper()
 
-    def run(self, test_limit: Optional[int] = None):
-        if not self.client:
-            raise RuntimeError(
-                "Google Service Account credentials missing. Please set GDRIVE_SERVICE_ACCOUNT_JSON "
-                "or place 'service_account.json' in this folder."
-            )
-
-        logger.info(f"Opening Google Sheet with ID: {self.spreadsheet_id}")
-        sh = self.client.open_by_key(self.spreadsheet_id)
-        try:
-            ws = sh.worksheet(SHEET_NAME)
-        except Exception:
-            # Fallback to first worksheet if sheet name differs slightly
-            ws = sh.get_worksheet(0)
-            logger.warning(f"Sheet '{SHEET_NAME}' not found; using '{ws.title}' instead.")
-
+    def run_sheet(self, sh, ws, test_limit: Optional[int] = None):
+        """Processes a single worksheet in Google Sheets"""
         logger.info(f"Connected to worksheet '{ws.title}' ({ws.row_count} rows, {ws.col_count} cols)")
 
         # Read row 1 and row 2 headers to find or create the date block
@@ -121,7 +107,7 @@ class GoogleSheetPriceTrackerBrain:
         for idx, val in enumerate(row1):
             if str(val).strip().lower() == self.date_header.strip().lower():
                 start_col = idx + 1
-                logger.info(f"Found existing date block for '{self.date_header}' at Col {start_col} ({col_to_letter(start_col)})")
+                logger.info(f"[{ws.title}] Found existing date block for '{self.date_header}' at Col {start_col} ({col_to_letter(start_col)})")
                 break
 
         # 2. If not found, find last column in row 2 with data
@@ -131,7 +117,7 @@ class GoogleSheetPriceTrackerBrain:
                 if val is not None and str(val).strip() != "":
                     last_used_col = idx + 1
             start_col = last_used_col + 1
-            logger.info(f"Creating NEW date block for '{self.date_header}' starting at Col {start_col} ({col_to_letter(start_col)})")
+            logger.info(f"[{ws.title}] Creating NEW date block for '{self.date_header}' starting at Col {start_col} ({col_to_letter(start_col)})")
 
             # Check if worksheet needs more columns
             needed_cols = start_col + BLOCK_SIZE - 1
@@ -163,7 +149,7 @@ class GoogleSheetPriceTrackerBrain:
                 },
                 "backgroundColor": {"red": 0.239, "green": 0.522, "blue": 0.776}
             })
-            logger.info(f"Merged and centered date header at {start_letter}1:{end_letter}1 (White text, Arial 8)")
+            logger.info(f"[{ws.title}] Merged and centered date header at {start_letter}1:{end_letter}1")
         except Exception as e:
             logger.warning(f"Note on date merge/format: {e}")
 
@@ -184,14 +170,29 @@ class GoogleSheetPriceTrackerBrain:
         except Exception as e:
             logger.warning(f"Note on sub-headers format: {e}")
 
-        # 5. Apply All Borders to the entire 6-column block (Row 1 to Row 249)
+        # 5. Read all product rows dynamically
+        logger.info(f"[{ws.title}] Discovering product rows...")
+        all_rows = ws.get_all_values()
+
+        active_row_indices = []
+        for r_idx, row_vals in enumerate(all_rows[FIRST_DATA_ROW - 1:], start=FIRST_DATA_ROW):
+            ch = row_vals[COL_CHANNEL - 1].strip() if len(row_vals) >= COL_CHANNEL else ""
+            m = row_vals[COL_MODEL - 1].strip() if len(row_vals) >= COL_MODEL else ""
+            l = row_vals[COL_LINK - 1].strip() if len(row_vals) >= COL_LINK else ""
+            if ch or m or l:
+                active_row_indices.append(r_idx)
+
+        last_data_row = max(active_row_indices) if active_row_indices else ws.row_count
+        logger.info(f"[{ws.title}] Found {len(active_row_indices)} active rows (Rows {FIRST_DATA_ROW} to {last_data_row})")
+
+        # 6. Apply All Borders to the entire 6-column block (Row 1 to last_data_row)
         try:
             border_req = {
                 "updateBorders": {
                     "range": {
                         "sheetId": ws.id,
                         "startRowIndex": 0,
-                        "endRowIndex": LAST_DATA_ROW,
+                        "endRowIndex": last_data_row,
                         "startColumnIndex": start_col - 1,
                         "endColumnIndex": start_col + BLOCK_SIZE - 1,
                     },
@@ -204,13 +205,13 @@ class GoogleSheetPriceTrackerBrain:
                 }
             }
             sh.batch_update({"requests": [border_req]})
-            logger.info(f"Applied all borders to range {start_letter}1:{end_letter}{LAST_DATA_ROW}")
+            logger.info(f"[{ws.title}] Applied all borders to range {start_letter}1:{end_letter}{last_data_row}")
         except Exception as e:
             logger.warning(f"Note on applying borders: {e}")
 
-        # 6. Format all data rows (Row 3 to 249): Black text, Arial 8, Center aligned
+        # 7. Format all data rows: Black text, Arial 8, Center aligned
         try:
-            ws.format(f"{start_letter}3:{end_letter}{LAST_DATA_ROW}", {
+            ws.format(f"{start_letter}3:{end_letter}{last_data_row}", {
                 "horizontalAlignment": "CENTER",
                 "verticalAlignment": "MIDDLE",
                 "textFormat": {
@@ -234,17 +235,13 @@ class GoogleSheetPriceTrackerBrain:
         col_bank_letter = col_to_letter(col_bank)
         col_coupon_letter = col_to_letter(col_coupon)
 
-        # Read product rows (channels, models, links)
-        logger.info(f"Reading product rows from {FIRST_DATA_ROW} to {LAST_DATA_ROW}...")
-        all_rows = ws.get_all_values()
-
         cells_to_update = []
         processed_count = 0
         success_count = 0
         fail_count = 0
         t0 = time.time()
 
-        for r in range(FIRST_DATA_ROW, min(LAST_DATA_ROW + 1, len(all_rows) + 1)):
+        for r in range(FIRST_DATA_ROW, min(last_data_row + 1, len(all_rows) + 1)):
             row_data = all_rows[r - 1] if (r - 1) < len(all_rows) else []
             channel = row_data[COL_CHANNEL - 1].strip() if len(row_data) >= COL_CHANNEL else ""
             model = row_data[COL_MODEL - 1].strip() if len(row_data) >= COL_MODEL else ""
@@ -267,11 +264,11 @@ class GoogleSheetPriceTrackerBrain:
                 continue
 
             if test_limit and processed_count >= test_limit:
-                logger.info(f"Reached test limit ({test_limit} products). Stopping scrape.")
+                logger.info(f"[{ws.title}] Reached test limit ({test_limit} products). Stopping sheet scrape.")
                 break
 
             processed_count += 1
-            logger.info(f"[{processed_count}] Row {r} | {channel.capitalize()} | Model: {model}")
+            logger.info(f"[{ws.title}][{processed_count}] Row {r} | {channel.capitalize()} | Model: {model}")
 
             scraped = None
             try:
@@ -328,7 +325,7 @@ class GoogleSheetPriceTrackerBrain:
                 try:
                     ws.update_cells(cells_to_update, value_input_option="USER_ENTERED")
                     cells_to_update = []
-                    logger.info("  [SYNC] Batch saved to Google Sheet.")
+                    logger.info(f"  [{ws.title}][SYNC] Batch saved to Google Sheet.")
                 except Exception as e:
                     logger.warning(f"  Batch save warning: {e}")
 
@@ -336,14 +333,44 @@ class GoogleSheetPriceTrackerBrain:
         if cells_to_update:
             try:
                 ws.update_cells(cells_to_update, value_input_option="USER_ENTERED")
-                logger.info("  [SYNC] Final batch saved to Google Sheet.")
+                logger.info(f"  [{ws.title}][SYNC] Final batch saved to Google Sheet.")
             except Exception as e:
                 logger.error(f"  Final save error: {e}")
 
         elapsed = time.time() - t0
         logger.info("=" * 60)
-        logger.info("  GOOGLE SHEET CRAWL COMPLETE")
+        logger.info(f"  GOOGLE SHEET [{ws.title}] CRAWL COMPLETE")
         logger.info(f"  Total Processed: {processed_count}")
         logger.info(f"  Successful: {success_count} | OOS/Failed: {fail_count}")
         logger.info(f"  Elapsed: {elapsed:.1f}s ({elapsed/60:.1f} mins)")
         logger.info("=" * 60)
+
+    def run(self, target_sheets: Optional[List[str]] = None, test_limit: Optional[int] = None):
+        """Processes all requested worksheets in Google Sheets"""
+        if not self.client:
+            raise RuntimeError(
+                "Google Service Account credentials missing. Please set GDRIVE_SERVICE_ACCOUNT_JSON "
+                "or place 'service_account.json' in this folder."
+            )
+
+        logger.info(f"Opening Google Sheet with ID: {self.spreadsheet_id}")
+        sh = self.client.open_by_key(self.spreadsheet_id)
+
+        from config import DEFAULT_SHEETS, find_matching_sheet_name
+        sheets = target_sheets or DEFAULT_SHEETS
+
+        available_titles = [w.title for w in sh.worksheets()]
+        logger.info(f"Available worksheets in Google Sheet: {available_titles}")
+
+        for sheet_req in sheets:
+            matched_name = find_matching_sheet_name(sheet_req, available_titles)
+            try:
+                ws = sh.worksheet(matched_name)
+            except Exception:
+                logger.warning(f"Could not open worksheet '{sheet_req}' (matched as '{matched_name}'). Skipping.")
+                continue
+
+            logger.info("=" * 60)
+            logger.info(f"  PROCESSING WORKSHEET: {ws.title}")
+            logger.info("=" * 60)
+            self.run_sheet(sh, ws, test_limit=test_limit)

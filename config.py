@@ -10,11 +10,24 @@ from datetime import datetime
 DEFAULT_WORKBOOK = "PriceTracker (6).xlsx"
 FALLBACK_WORKBOOK = "PriceTracker.xlsx"
 
-SHEET_NAME = "Competitor price monitoring"
+PRIMARY_SHEET = "Competitor price monitoring"
+SECONDARY_SHEET = "Secondary_Competitor"
+DEFAULT_SHEETS = [PRIMARY_SHEET, SECONDARY_SHEET]
 
-# Data row boundaries in "Competitor price monitoring"
+SHEET_NAME = PRIMARY_SHEET
+
+# Data row boundaries
 FIRST_DATA_ROW = 3
-LAST_DATA_ROW = 249
+LAST_DATA_ROW = 247  # Fallback row boundary (dynamic discovery used by default)
+
+def find_matching_sheet_name(target_name: str, available_names: list) -> str:
+    """Finds exact or case-insensitive matching sheet name from available sheets"""
+    target_clean = target_name.strip().lower().replace("_", "").replace(" ", "")
+    for name in available_names:
+        clean = name.strip().lower().replace("_", "").replace(" ", "")
+        if clean == target_clean:
+            return name
+    return target_name
 
 # Fixed input columns (1-based index)
 COL_SERIES_NUM = 1      # Col A: Priority / Index

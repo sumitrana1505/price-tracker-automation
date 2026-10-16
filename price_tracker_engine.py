@@ -62,7 +62,6 @@ class PriceTrackerBrain:
         self.file_path = file_path
         self.date_header = date_header or format_today_header()
         self.wb = None
-        self.ws = None
         self.fk_scraper = FlipkartScraper()
         self.amz_scraper = AmazonScraper()
 
@@ -73,24 +72,19 @@ class PriceTrackerBrain:
         
         logger.info(f"Loading workbook: {self.file_path}")
         self.wb = openpyxl.load_workbook(self.file_path)
-        if SHEET_NAME not in self.wb.sheetnames:
-            raise ValueError(f"Sheet '{SHEET_NAME}' not found in {self.wb.sheetnames}")
-        self.ws = self.wb[SHEET_NAME]
-        logger.info(f"Loaded sheet '{SHEET_NAME}' ({self.ws.max_row} rows, {self.ws.max_column} cols)")
 
-    def find_or_create_date_columns(self) -> int:
+    def find_or_create_date_columns(self, ws, last_row: int) -> int:
         """
         Locates existing 6-column block for today's date, or appends a new block.
         Returns the 1-based start column index.
         """
-        ws = self.ws
         max_col = ws.max_column
 
         # Search existing Row 1 headers for target date
         for c in range(21, max_col + 1):
             val = ws.cell(1, c).value
             if val is not None and str(val).strip().lower() == self.date_header.strip().lower():
-                logger.info(f"Found existing column block for '{self.date_header}' at Col {c} ({get_column_letter(c)})")
+                logger.info(f"[{ws.title}] Found existing column block for '{self.date_header}' at Col {c} ({get_column_letter(c)})")
                 return c
 
         # Block does not exist; determine last used column in row 2
@@ -102,7 +96,7 @@ class PriceTrackerBrain:
 
         new_start_col = last_used_col + 1
         end_col = new_start_col + BLOCK_SIZE - 1
-        logger.info(f"Creating NEW column block for '{self.date_header}' at Col {new_start_col}-{end_col} ({get_column_letter(new_start_col)}-{get_column_letter(end_col)})")
+        logger.info(f"[{ws.title}] Creating NEW column block for '{self.date_header}' at Col {new_start_col}-{end_col} ({get_column_letter(new_start_col)}-{get_column_letter(end_col)})")
 
         thin_side = Side(border_style="thin", color="000000")
         all_borders = Border(top=thin_side, bottom=thin_side, left=thin_side, right=thin_side)
@@ -133,10 +127,10 @@ class PriceTrackerBrain:
             sub_cell.border = all_borders
             sub_cell.fill = header_fill
 
-        # 3. Format All Borders, Black Font, Arial 8, Center Alignment for all data rows (Row 3 to 249)
+        # 3. Format All Borders, Black Font, Arial 8, Center Alignment for all data rows
         data_font = Font(name="Arial", size=8, bold=False, color="000000")
         data_align = Alignment(horizontal="center", vertical="center")
-        for r in range(FIRST_DATA_ROW, LAST_DATA_ROW + 1):
+        for r in range(FIRST_DATA_ROW, last_row + 1):
             for c in range(new_start_col, end_col + 1):
                 data_c = ws.cell(r, c)
                 data_c.border = all_borders
@@ -145,30 +139,11 @@ class PriceTrackerBrain:
 
         return new_start_col
 
-    def execute(self, test_limit: Optional[int] = None, skip_existing: bool = False):
-        """
-        Runs the data fetching and Excel updating process.
-        test_limit: If set, only processes first N rows with valid links.
-        skip_existing: If True, skips rows that already have Price filled.
-        """
-        self.load_workbook()
-        start_col = self.find_or_create_date_columns()
-        
-        col_price = start_col
-        col_bank = start_col + 1
-        col_coupon = start_col + 2
-        col_nep = start_col + 3
-        col_rating = start_col + 4
-        col_rc = start_col + 5
-
-        col_price_letter = get_column_letter(col_price)
-        col_bank_letter = get_column_letter(col_bank)
-        col_coupon_letter = get_column_letter(col_coupon)
-
-        ws = self.ws
+    def execute_sheet(self, ws, test_limit: Optional[int] = None, skip_existing: bool = False):
+        """Executes price tracking on a single worksheet"""
+        # Dynamically discover all active product rows in this sheet
         rows_to_process = []
-
-        for r in range(FIRST_DATA_ROW, LAST_DATA_ROW + 1):
+        for r in range(FIRST_DATA_ROW, ws.max_row + 1):
             channel = str(ws.cell(r, COL_CHANNEL).value or "").strip()
             model = str(ws.cell(r, COL_MODEL).value or "").strip()
             link = str(ws.cell(r, COL_LINK).value or "").strip()
@@ -183,8 +158,26 @@ class PriceTrackerBrain:
                 "link": link
             })
 
-        logger.info(f"Total tracker rows to monitor: {len(rows_to_process)}")
-        
+        if not rows_to_process:
+            logger.warning(f"[{ws.title}] No product rows found.")
+            return
+
+        last_row = max(item["row"] for item in rows_to_process)
+        start_col = self.find_or_create_date_columns(ws, last_row)
+
+        col_price = start_col
+        col_bank = start_col + 1
+        col_coupon = start_col + 2
+        col_nep = start_col + 3
+        col_rating = start_col + 4
+        col_rc = start_col + 5
+
+        col_price_letter = get_column_letter(col_price)
+        col_bank_letter = get_column_letter(col_bank)
+        col_coupon_letter = get_column_letter(col_coupon)
+
+        logger.info(f"[{ws.title}] Total rows to monitor: {len(rows_to_process)} (Rows {FIRST_DATA_ROW} to {last_row})")
+
         processed_count = 0
         success_count = 0
         fail_count = 0
@@ -215,11 +208,11 @@ class PriceTrackerBrain:
                 continue
 
             if test_limit and processed_count >= test_limit:
-                logger.info(f"Reached test limit ({test_limit} products). Stopping test run.")
+                logger.info(f"[{ws.title}] Reached test limit ({test_limit} products). Stopping sheet crawl.")
                 break
 
             processed_count += 1
-            logger.info(f"[{processed_count}] Row {r} | {ch.capitalize()} | Model: {model}")
+            logger.info(f"[{ws.title}][{processed_count}] Row {r} | {ch.capitalize()} | Model: {model}")
 
             scraped_data = None
             try:
@@ -233,7 +226,6 @@ class PriceTrackerBrain:
                 logger.error(f"  Scrape exception on row {r}: {e}")
 
             if scraped_data and isinstance(scraped_data.price, int):
-                # Write Scraped Data
                 ws.cell(r, col_price, scraped_data.price)
                 ws.cell(r, col_bank, scraped_data.bank_offer)
                 ws.cell(r, col_coupon, scraped_data.coupon or 0)
@@ -272,15 +264,30 @@ class PriceTrackerBrain:
             if processed_count % 5 == 0:
                 self.save_workbook()
 
-        # Final save
-        self.save_workbook()
         elapsed = time.time() - t0
-        logger.info("=" * 60)
-        logger.info("  CRAWL COMPLETE")
-        logger.info(f"  Total Processed: {processed_count}")
-        logger.info(f"  Successful: {success_count} | OOS/Failed: {fail_count}")
-        logger.info(f"  Elapsed: {elapsed:.1f}s ({elapsed/60:.1f} mins)")
-        logger.info("=" * 60)
+        logger.info(f"[{ws.title}] CRAWL COMPLETE: Processed {processed_count} (Success: {success_count}, Failed/OOS: {fail_count}) in {elapsed:.1f}s")
+
+    def execute(self, sheet_names: Optional[List[str]] = None, test_limit: Optional[int] = None, skip_existing: bool = False):
+        """
+        Runs the data fetching and Excel updating process across specified sheets.
+        """
+        self.load_workbook()
+
+        from config import DEFAULT_SHEETS, find_matching_sheet_name
+        target_sheets = sheet_names or DEFAULT_SHEETS
+
+        for sheet_req in target_sheets:
+            matched_name = find_matching_sheet_name(sheet_req, self.wb.sheetnames)
+            if matched_name not in self.wb.sheetnames:
+                logger.warning(f"Sheet '{sheet_req}' not found in workbook {self.wb.sheetnames}. Skipping.")
+                continue
+
+            ws = self.wb[matched_name]
+            logger.info("=" * 60)
+            logger.info(f"  PROCESSING SHEET: {ws.title}")
+            logger.info("=" * 60)
+            self.execute_sheet(ws, test_limit=test_limit, skip_existing=skip_existing)
+            self.save_workbook()
 
     def save_workbook(self):
         """Safe workbook save handling Windows file locks"""
@@ -316,6 +323,7 @@ def main():
     parser.add_argument("--skip-existing", action="store_true", help="Skip rows that already have price data")
     parser.add_argument("--sync-gdrive", action="store_true", help="Download from and upload back to Google Drive")
     parser.add_argument("--gsheet", default=None, help="Direct Google Sheet Spreadsheet ID")
+    parser.add_argument("--sheet", default=None, help="Specific sheet name to process (or 'all')")
     args = parser.parse_args()
 
     # Read from CLI flags or environment variables
@@ -331,17 +339,32 @@ def main():
         except ValueError:
             test_limit = None
 
+    sheet_env = os.getenv("TARGET_SHEET")
+    sheet_param = args.sheet or sheet_env or "all"
+    sheet_clean = sheet_param.strip().lower()
+
+    from config import DEFAULT_SHEETS, PRIMARY_SHEET, SECONDARY_SHEET
+    if sheet_clean in ["all", "both", ""]:
+        target_sheets = DEFAULT_SHEETS
+    elif "secondary" in sheet_clean:
+        target_sheets = [SECONDARY_SHEET]
+    elif "competitor" in sheet_clean or "primary" in sheet_clean:
+        target_sheets = [PRIMARY_SHEET]
+    else:
+        target_sheets = [sheet_param.strip()]
+
     if spreadsheet_id:
         from gsheet_engine import GoogleSheetPriceTrackerBrain
         logger.info("=" * 60)
         logger.info("  DIRECT GOOGLE SHEETS MODE")
         logger.info(f"  Spreadsheet ID: {spreadsheet_id}")
         logger.info(f"  Date Header: {target_date}")
+        logger.info(f"  Target Sheet(s): {target_sheets}")
         if test_limit:
             logger.info(f"  Test Limit: {test_limit} products")
         logger.info("=" * 60)
         gsheet_brain = GoogleSheetPriceTrackerBrain(spreadsheet_id=spreadsheet_id, date_header=target_date)
-        gsheet_brain.run(test_limit=test_limit)
+        gsheet_brain.run(target_sheets=target_sheets, test_limit=test_limit)
         return
 
     target_file = args.file or resolve_default_file()
@@ -349,8 +372,11 @@ def main():
     logger.info("=" * 60)
     logger.info("  PRICE TRACKER AUTOMATION BRAIN")
     logger.info(f"  Target File: {target_file}")
-    logger.info(f"  Date Header: {args.date or format_today_header()}")
+    logger.info(f"  Date Header: {target_date}")
+    logger.info(f"  Target Sheet(s): {target_sheets}")
     logger.info(f"  Google Drive Sync: {'Enabled' if args.sync_gdrive else 'Disabled'}")
+    if test_limit:
+        logger.info(f"  Test Limit: {test_limit} products")
     logger.info("=" * 60)
 
     gdrive = GoogleDriveSync()
@@ -358,8 +384,8 @@ def main():
         logger.info("Syncing latest version from Google Drive before crawl...")
         gdrive.download_file(target_file)
 
-    brain = PriceTrackerBrain(file_path=target_file, date_header=args.date)
-    brain.execute(test_limit=args.test, skip_existing=args.skip_existing)
+    brain = PriceTrackerBrain(file_path=target_file, date_header=target_date)
+    brain.execute(sheet_names=target_sheets, test_limit=test_limit, skip_existing=args.skip_existing)
 
     if args.sync_gdrive and gdrive.is_configured():
         logger.info("Uploading updated workbook to Google Drive...")
