@@ -313,21 +313,55 @@ class AmazonScraper:
     }
 
     def __init__(self, pincode: str = DEFAULT_PINCODE):
-        self.pincode = pincode
+        self.default_pincode = str(pincode or DEFAULT_PINCODE)
+        self.current_pincode = None
+        self._init_session()
+
+    def _init_session(self):
+        """Initializes a new browser-impersonated session with default pincode set"""
         if curl_requests:
             self.session = curl_requests.Session(impersonate="safari15_5")
         else:
             self.session = requests.Session()
             self.session.headers.update(self.MOBILE_HEADERS)
+        self.current_pincode = None
+        self._ensure_pincode(self.default_pincode)
 
-    def _set_pincode(self, soup: BeautifulSoup, referer_url: str, pincode: str) -> bool:
-        """Sets delivery pincode on Amazon"""
-        token_el = soup.find(id='glowValidationToken')
-        token = token_el.get('value', '') if token_el else ''
+    def _extract_csrf_token(self, soup: BeautifulSoup) -> str:
+        """Extracts CSRF / glow validation token from page DOM or embedded scripts"""
+        for inp in soup.find_all('input'):
+            n = inp.get('name', '').lower()
+            i = inp.get('id', '').lower()
+            if 'anti-csrftoken-a2z' in n or 'glow-validation-token' in n or 'glowvalidationtoken' in i or 'anti-csrf' in i:
+                val = inp.get('value', '').strip()
+                if val:
+                    return val
+        for s in soup.find_all('script'):
+            if s.string:
+                m = re.search(r'anti-csrftoken-a2z["\']?\s*[:=]\s*["\']([^"\']+)["\']', s.string)
+                if m:
+                    return m.group(1)
+        return ""
+
+    def _set_pincode(self, soup: Optional[BeautifulSoup], referer_url: str, pincode: str) -> bool:
+        """Sets delivery pincode on Amazon via glow endpoint"""
+        token = ""
+        if soup:
+            token = self._extract_csrf_token(soup)
+
+        # If token was not found on product page, harvest from Amazon gateway
+        if not token:
+            try:
+                r0 = self.session.get("https://www.amazon.in/", headers=self.MOBILE_HEADERS, timeout=12)
+                if r0.status_code == 200:
+                    soup0 = BeautifulSoup(r0.text, 'html.parser')
+                    token = self._extract_csrf_token(soup0)
+            except Exception:
+                pass
 
         post_data = {
             'locationType': 'LOCATION_INPUT',
-            'zipCode': pincode,
+            'zipCode': str(pincode),
             'storeContext': 'generic',
             'deviceType': 'mobile',
             'pageType': 'Detail',
@@ -337,28 +371,35 @@ class AmazonScraper:
             'User-Agent': self.MOBILE_HEADERS['User-Agent'],
             'Accept': 'application/json, text/javascript, */*; q=0.01',
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'Referer': referer_url,
+            'Referer': referer_url or 'https://www.amazon.in/',
             'x-requested-with': 'XMLHttpRequest',
             'anti-csrftoken-a2z': token,
         }
         try:
             url = 'https://www.amazon.in/portal-migration/hz/glow/address-change?actionSource=glow'
-            res = self.session.post(url, data=post_data, headers=post_headers, timeout=15)
+            res = self.session.post(url, data=post_data, headers=post_headers, timeout=12)
             if res.status_code == 200:
                 data = res.json()
-                return data.get('successful') == 1 or data.get('isAddressUpdated') == 1
-        except Exception:
-            pass
+                if data.get('successful') == 1 or data.get('isAddressUpdated') == 1:
+                    self.current_pincode = str(pincode)
+                    logger.debug(f"[Amazon] Successfully set delivery pincode to {pincode}")
+                    return True
+        except Exception as e:
+            logger.debug(f"[Amazon] Pincode change failed for {pincode}: {e}")
         return False
+
+    def _ensure_pincode(self, pincode: str) -> bool:
+        """Ensures the session has the requested pincode active"""
+        if self.current_pincode == str(pincode):
+            return True
+        return self._set_pincode(None, 'https://www.amazon.in/', str(pincode))
 
     def scrape(self, url: str, model: str = "") -> ProductScrapedData:
         data = ProductScrapedData(model=model, channel="Amazon", url=url)
-        
-        # Clear cookies before each product to avoid Amazon session tracking/CAPTCHA triggers
-        try:
-            self.session.cookies.clear()
-        except Exception:
-            pass
+
+        # 1. Ensure default pincode (Delhi 110001) is active
+        if self.current_pincode != self.default_pincode:
+            self._ensure_pincode(self.default_pincode)
 
         # Jitter delay
         time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
@@ -374,10 +415,7 @@ class AmazonScraper:
                 if resp.status_code == 200:
                     if "captcha" in resp.text.lower() or "type the characters" in resp.text.lower():
                         logger.warning(f"[Amazon] CAPTCHA detected on attempt {attempt}")
-                        try:
-                            self.session.cookies.clear()
-                        except Exception:
-                            pass
+                        self._init_session()
                         time.sleep(attempt * 2)
                         continue
                     break
@@ -410,15 +448,17 @@ class AmazonScraper:
         # 4. Extract Rating & Review Count
         self._extract_rating_and_reviews(soup, resp.text, data)
 
-        # Check if item is out of stock or missing price
+        # 5. Check if item is out of stock or missing price in Delhi
         is_oos = self._is_out_of_stock(soup)
         if data.price is None or is_oos:
-            logger.info(f"  [Amazon] Initial check: {'OOS' if is_oos else 'No price'}. Checking alternate pincodes...")
+            # Check alternate pincodes (excluding default_pincode which was already checked)
+            alternate_pins = [p for p in AMAZON_PINCODES if str(p) != str(self.default_pincode)]
+            logger.info(f"  [Amazon] Initial check (Pincode {self.default_pincode}): {'OOS' if is_oos else 'No price'}. Checking {len(alternate_pins)} alternate pincodes...")
             found_stock = False
 
-            for pin in AMAZON_PINCODES:
+            for pin in alternate_pins:
                 logger.info(f"    -> Switching to Pincode {pin}...")
-                changed = self._set_pincode(soup, url, pin)
+                changed = self._set_pincode(soup, url, str(pin))
                 if not changed:
                     continue
                 time.sleep(1.0)
@@ -439,7 +479,6 @@ class AmazonScraper:
                             data.in_stock = True
                             data.bank_offer = self._extract_bank_offers(soup_retry, url, price=p_retry)
                             data.coupon = self._extract_coupon(soup_retry, price=p_retry, page_text=resp_retry.text)
-                            # Update rating if retry has it
                             self._extract_rating_and_reviews(soup_retry, resp_retry.text, data)
                             found_stock = True
                             break
@@ -447,11 +486,15 @@ class AmazonScraper:
                     logger.debug(f"    Error checking pincode {pin}: {e}")
 
             if not found_stock:
-                logger.info(f"  [Amazon] Out of stock across all {len(AMAZON_PINCODES)} pincodes. Marked as 'OOS'.")
+                logger.info(f"  [Amazon] Out of stock across all checked pincodes. Marked as 'OOS'.")
                 data.in_stock = False
                 data.price = "OOS"
                 data.bank_offer = None
                 data.coupon = 0
+
+            # Switch session back to default Delhi pincode for subsequent products
+            if self.current_pincode != self.default_pincode:
+                self._ensure_pincode(self.default_pincode)
 
         return data
 
@@ -460,11 +503,21 @@ class AmazonScraper:
         avail_el = soup.find(id='availability')
         if avail_el:
             txt = avail_el.get_text().lower()
-            if any(term in txt for term in ['currently unavailable', 'out of stock', "don't know when", 'unavailable']):
+            if any(term in txt for term in ['currently unavailable', 'out of stock', "don't know when", 'cannot be dispatched', 'temporarily unavailable']):
                 return True
+            if any(term in txt for term in ['in stock', 'usually dispatched', 'only', 'order soon', 'left in stock']):
+                return False
+
+        # Check global dispatch / location block alerts
+        for alert in soup.select('#deliveryBlockMessage, .delivery-message, #delivery-block'):
+            t = alert.get_text().lower()
+            if 'cannot be dispatched to your selected delivery location' in t or 'cannot be delivered' in t:
+                return True
+
         return False
 
     def _extract_price(self, soup: BeautifulSoup) -> Optional[int]:
+        # 1. Standard corePrice containers
         cp = (soup.find(id='corePriceDisplay_mobile_feature_div') or 
               soup.find(id='corePrice_desktop') or 
               soup.find(id='corePriceDisplay_desktop_feature_div'))
@@ -476,15 +529,37 @@ class AmazonScraper:
                 val = clean_digits(w_text)
                 if val:
                     return val
+            off = ptp.select_one('.a-price .a-offscreen') or cp.select_one('.a-offscreen')
+            if off:
+                val = clean_digits(off.get_text())
+                if val:
+                    return val
             m = re.search(r'₹\s*([\d,]+(?:\.\d+)?)', cp.get_text())
             if m:
                 return clean_digits(m.group(1))
 
+        # 2. priceToPay anywhere in DOM
         ptp = soup.find(class_='priceToPay')
         if ptp:
             whole = ptp.find(class_='a-price-whole')
             if whole:
-                return clean_digits(whole.get_text(strip=True))
+                val = clean_digits(whole.get_text(strip=True))
+                if val:
+                    return val
+            off = ptp.select_one('.a-offscreen')
+            if off:
+                val = clean_digits(off.get_text())
+                if val:
+                    return val
+
+        # 3. apex desktop / mobile
+        apex = soup.find(id='apex_desktop') or soup.find(id='apex_mobile')
+        if apex:
+            off = apex.select_one('.a-price .a-offscreen')
+            if off:
+                val = clean_digits(off.get_text())
+                if val:
+                    return val
 
         return None
 
