@@ -1,0 +1,59 @@
+name: AZ In_Stock Rate
+
+on:
+  schedule:
+    # Runs daily at 04:15 UTC (09:45 AM IST)
+    - cron: '15 4 * * *'
+  workflow_dispatch:
+    inputs:
+      custom_date:
+        description: 'Custom Date (leave blank for today e.g. 2026-10-17)'
+        required: false
+        default: ''
+      test_limit:
+        description: 'Limit number of products for testing (leave blank for all)'
+        required: false
+        default: ''
+
+jobs:
+  track-az-stock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Execute AZ In_Stock Rate
+        env:
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GSHEET_SPREADSHEET_ID: ${{ secrets.GSHEET_SPREADSHEET_ID }}
+          GDRIVE_FILE_ID: ${{ secrets.GDRIVE_FILE_ID }}
+          CUSTOM_DATE: ${{ github.event.inputs.custom_date }}
+          TEST_LIMIT: ${{ github.event.inputs.test_limit }}
+        run: |
+          python AZ_Stock.py
+
+      - name: Commit and Push Updated Tracker to Repo (Backup)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
+          git add ourmodels_pincode.xlsx || true
+          git add "PriceTracker (6).xlsx" || true
+          git add PriceTracker*.xlsx || true
+          git diff --staged --quiet || (git commit -m "Automated AZ In_Stock Rate update: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" && git push origin main)
