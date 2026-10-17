@@ -354,6 +354,12 @@ class AmazonScraper:
     def scrape(self, url: str, model: str = "") -> ProductScrapedData:
         data = ProductScrapedData(model=model, channel="Amazon", url=url)
         
+        # Clear cookies before each product to avoid Amazon session tracking/CAPTCHA triggers
+        try:
+            self.session.cookies.clear()
+        except Exception:
+            pass
+
         # Jitter delay
         time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
 
@@ -366,9 +372,13 @@ class AmazonScraper:
                     resp = self.session.get(url, headers=self.MOBILE_HEADERS, timeout=REQUEST_TIMEOUT)
 
                 if resp.status_code == 200:
-                    if "captcha" in resp.text.lower() or "Type the characters" in resp.text:
+                    if "captcha" in resp.text.lower() or "type the characters" in resp.text.lower():
                         logger.warning(f"[Amazon] CAPTCHA detected on attempt {attempt}")
-                        time.sleep(3)
+                        try:
+                            self.session.cookies.clear()
+                        except Exception:
+                            pass
+                        time.sleep(attempt * 2)
                         continue
                     break
                 elif resp.status_code == 404:
@@ -381,9 +391,9 @@ class AmazonScraper:
                 logger.warning(f"[Amazon] Attempt {attempt} failed: {e}")
                 time.sleep(attempt * 1.5)
 
-        if not resp or resp.status_code != 200:
+        if not resp or resp.status_code != 200 or "captcha" in resp.text.lower() or "type the characters" in resp.text.lower():
             data.in_stock = False
-            data.error_msg = f"HTTP {resp.status_code if resp else 'No response'}"
+            data.error_msg = f"HTTP {resp.status_code if resp else 'No response'} (Blocked/CAPTCHA)"
             return data
 
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -647,16 +657,23 @@ class AmazonScraper:
 
     def _extract_rating_and_reviews(self, soup: BeautifulSoup, page_text: str, data: ProductScrapedData):
         # 1. Rating
-        rating_el = soup.select_one('#acrPopover span.a-icon-alt')
-        if rating_el:
-            data.rating = clean_float(rating_el.get_text())
+        for sel in [
+            '#acrPopover span.a-icon-alt',
+            '#acrCustomerReviewLink span.a-icon-alt',
+            '[data-hook="rating-out-of-text"]',
+            '#pqv-ratings'
+        ]:
+            el = soup.select_one(sel)
+            if el:
+                r = clean_float(el.get_text())
+                if r and 1.0 <= r <= 5.0:
+                    data.rating = r
+                    break
 
         if not data.rating:
-            for el in soup.find_all(string=re.compile(r'\d\.\d\s+out of 5')):
-                m = re.search(r'(\d\.\d)', el)
-                if m:
-                    data.rating = clean_float(m.group(1))
-                    break
+            m = re.search(r'([1-5]\.\d)\s+out of\s+5', page_text)
+            if m:
+                data.rating = clean_float(m.group(1))
 
         if not data.rating:
             for script in soup.find_all("script", type="application/ld+json"):
@@ -670,24 +687,75 @@ class AmazonScraper:
                 except Exception:
                     pass
 
-        # 2. Reviews Count
-        rc_el = soup.select_one('#acrCustomerReviewText')
-        if rc_el:
-            data.rating_count = clean_digits(rc_el.get_text())
+        # 2. Rating Count / Reviews Count
+        # (a) Check data-hook="total-rating-count" (standard across Amazon product reviews header)
+        el_hook = soup.select_one('[data-hook="total-rating-count"]')
+        if el_hook:
+            rc = clean_digits(el_hook.get_text())
+            if rc and rc > 0:
+                data.rating_count = rc
 
+        # (b) Check #acrCustomerReviewLink (mobile header rating link e.g. "(1,050)")
         if not data.rating_count:
-            for script in soup.find_all("script", type="application/ld+json"):
-                try:
-                    obj = json.loads(script.string or "")
-                    if isinstance(obj, dict):
-                        rc = (obj.get("aggregateRating") or {}).get("ratingCount")
-                        if rc:
-                            data.rating_count = clean_digits(rc)
+            acr_link = soup.select_one('#acrCustomerReviewLink')
+            if acr_link:
+                for span in acr_link.find_all('span'):
+                    aria = span.get('aria-label', '')
+                    if 'review' in aria.lower() or 'rating' in aria.lower():
+                        rc = clean_digits(aria)
+                        if rc and rc > 0:
+                            data.rating_count = rc
                             break
-                except Exception:
-                    pass
+                if not data.rating_count:
+                    m = re.search(r'\(([\d,]+)\)', acr_link.get_text())
+                    if m:
+                        rc = clean_digits(m.group(1))
+                        if rc and rc > 0:
+                            data.rating_count = rc
 
+        # (c) Check #acrCustomerReviewText (desktop review text)
         if not data.rating_count:
-            m = re.search(r'([\d,]+)\s+ratings?\b', page_text, re.I)
+            rc_el = soup.select_one('#acrCustomerReviewText')
+            if rc_el:
+                rc = clean_digits(rc_el.get_text())
+                if rc and rc > 0:
+                    data.rating_count = rc
+
+        # (d) Check #pqv-ratings e.g. '4.1 out of 5 stars, 1,318 ratings'
+        if not data.rating_count:
+            pqv = soup.select_one('#pqv-ratings')
+            if pqv:
+                m = re.search(r'out of 5 stars,?\s*([\d,]+)\s+ratings?', pqv.get_text(), re.I)
+                if m:
+                    rc = clean_digits(m.group(1))
+                    if rc and rc > 0:
+                        data.rating_count = rc
+
+        # (e) Product Details table row: Customer Reviews
+        if not data.rating_count:
+            for th in soup.find_all(class_=re.compile(r'prodDetSectionEntry')):
+                if 'customer reviews' in th.get_text().lower():
+                    td = th.find_next_sibling('td')
+                    if td:
+                        a_tag = td.find('a')
+                        if a_tag:
+                            rc = clean_digits(a_tag.get_text())
+                            if rc and rc > 0:
+                                data.rating_count = rc
+                                break
+
+        # (f) Regex on raw HTML for global ratings: e.g. '1,318 global ratings'
+        if not data.rating_count:
+            m = re.search(r'([\d,]+)\s+global\s+ratings?', page_text, re.I)
             if m:
-                data.rating_count = clean_digits(m.group(1))
+                rc = clean_digits(m.group(1))
+                if rc and rc > 0:
+                    data.rating_count = rc
+
+        # (g) Regex for aria-label="X,XXX Reviews"
+        if not data.rating_count:
+            m = re.search(r'aria-label=["\']([\d,]+)\s+Reviews?["\']', page_text, re.I)
+            if m:
+                rc = clean_digits(m.group(1))
+                if rc and rc > 0:
+                    data.rating_count = rc
