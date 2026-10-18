@@ -339,7 +339,7 @@ def main():
         except ValueError:
             test_limit = None
 
-    from config import DEFAULT_SHEETS, PRIMARY_SHEET, SECONDARY_SHEET
+    from config import DEFAULT_SHEETS, PRIMARY_SHEET, SECONDARY_SHEET, ARCHIVE_SHEET
 
     sheet_env = os.getenv("TARGET_SHEET")
     sheet_param = args.sheet or sheet_env or PRIMARY_SHEET
@@ -347,9 +347,11 @@ def main():
 
     if sheet_clean in ["all", "both"]:
         target_sheets = [PRIMARY_SHEET, SECONDARY_SHEET]
+    elif "archive" in sheet_clean or "oldsheet" in sheet_clean or "2026-08-25" in sheet_clean:
+        target_sheets = [ARCHIVE_SHEET]
     elif "secondary" in sheet_clean:
         target_sheets = [SECONDARY_SHEET]
-    elif "competitor" in sheet_clean or "primary" in sheet_clean:
+    elif sheet_clean in ["competitor", "primary", "competitor price monitoring", "competitor_price_monitoring"]:
         target_sheets = [PRIMARY_SHEET]
     else:
         target_sheets = [sheet_param.strip()]

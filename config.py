@@ -12,6 +12,7 @@ FALLBACK_WORKBOOK = "PriceTracker.xlsx"
 
 PRIMARY_SHEET = "Competitor price monitoring"
 SECONDARY_SHEET = "Secondary_Competitor"
+ARCHIVE_SHEET = "Competitor price monitoring__ARCHIVE__2026-08-25"
 DEFAULT_SHEETS = [PRIMARY_SHEET]
 
 SHEET_NAME = PRIMARY_SHEET
@@ -21,12 +22,31 @@ FIRST_DATA_ROW = 3
 LAST_DATA_ROW = 247  # Fallback row boundary (dynamic discovery used by default)
 
 def find_matching_sheet_name(target_name: str, available_names: list) -> str:
-    """Finds exact or case-insensitive matching sheet name from available sheets"""
+    """Finds exact, case-insensitive, or prefix-matching sheet name from available sheets"""
+    # 1. Exact match
+    if target_name in available_names:
+        return target_name
+
     target_clean = target_name.strip().lower().replace("_", "").replace(" ", "")
+    # 2. Normalized match (ignoring case, spaces, and underscores)
     for name in available_names:
         clean = name.strip().lower().replace("_", "").replace(" ", "")
         if clean == target_clean:
             return name
+
+    # 3. If target has 'archive' or 'oldsheet', prefer any sheet containing 'archive' or '__ar'
+    if "archive" in target_clean or "oldsheet" in target_clean or "2026-08-25" in target_clean:
+        for name in available_names:
+            nl = name.strip().lower()
+            if "archive" in nl or "__ar" in nl or "oldsheet" in nl:
+                return name
+
+    # 4. Truncated / longest prefix match (handles Excel 31-character tab limit)
+    for name in sorted(available_names, key=len, reverse=True):
+        clean = name.strip().lower().replace("_", "").replace(" ", "")
+        if target_clean.startswith(clean) or clean.startswith(target_clean):
+            return name
+
     return target_name
 
 # Fixed input columns (1-based index)
