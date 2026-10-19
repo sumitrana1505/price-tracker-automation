@@ -84,6 +84,26 @@ def clean_float(val: Any) -> Optional[float]:
     return None
 
 
+def normalize_amazon_url(url: str) -> str:
+    """Cleans and canonicalizes Amazon product URLs, repairing malformed hostnames and extracting ASIN"""
+    if not url:
+        return ""
+    raw_url = str(url).strip()
+    if raw_url and "://" not in raw_url:
+        raw_url = "https://" + raw_url
+
+    # Fix broken hostnames from Excel replacements (e.g. amazon.iNonecer -> amazon.in)
+    if "amazon.in" not in raw_url and "amazon" in raw_url:
+        raw_url = re.sub(r'https?://(?:www\.)?amazon\.[a-zA-Z0-9_\.-]+', 'https://www.amazon.in', raw_url)
+
+    # Extract canonical product URL if ASIN is present
+    asin_m = re.search(r'/(?:dp|gp/product)/([A-Z0-9]{10})', raw_url)
+    if asin_m:
+        return f"https://www.amazon.in/dp/{asin_m.group(1)}?th=1&psc=1"
+
+    return raw_url
+
+
 # ─────────────────────────────────────────────────────────────
 # Flipkart Scraper
 # ─────────────────────────────────────────────────────────────
@@ -292,7 +312,16 @@ class FlipkartScraper:
 # ─────────────────────────────────────────────────────────────
 
 class AmazonScraper:
-    """High-reliability scraper for Amazon India product pages"""
+    """High-reliability scraper for Amazon India product pages with dynamic pincode switching"""
+
+    HEADERS = {
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        ),
+        'Accept-Language': 'en-IN,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    }
 
     MOBILE_HEADERS = {
         'User-Agent': (
@@ -303,27 +332,18 @@ class AmazonScraper:
         'Accept-Language': 'en-IN,en-GB;q=0.9,en;q=0.8',
     }
 
-    DESKTOP_HEADERS = {
-        'User-Agent': (
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-        ),
-        'Accept-Language': 'en-IN,en;q=0.9,hi;q=0.8',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    }
-
     def __init__(self, pincode: str = DEFAULT_PINCODE):
         self.default_pincode = str(pincode or DEFAULT_PINCODE)
         self.current_pincode = None
         self._init_session()
 
     def _init_session(self):
-        """Initializes a new browser-impersonated session with default pincode set"""
+        """Initializes a browser-impersonated session with default Delhi pincode set"""
         if curl_requests:
-            self.session = curl_requests.Session(impersonate="safari15_5")
+            self.session = curl_requests.Session(impersonate="chrome124")
         else:
             self.session = requests.Session()
-            self.session.headers.update(self.MOBILE_HEADERS)
+            self.session.headers.update(self.HEADERS)
         self.current_pincode = None
         self._ensure_pincode(self.default_pincode)
 
@@ -332,7 +352,7 @@ class AmazonScraper:
         for inp in soup.find_all('input'):
             n = inp.get('name', '').lower()
             i = inp.get('id', '').lower()
-            if 'anti-csrftoken-a2z' in n or 'glow-validation-token' in n or 'glowvalidationtoken' in i or 'anti-csrf' in i:
+            if any(k in n or k in i for k in ['anti-csrftoken-a2z', 'glow-validation-token', 'glowvalidationtoken', 'anti-csrf']):
                 val = inp.get('value', '').strip()
                 if val:
                     return val
@@ -349,10 +369,10 @@ class AmazonScraper:
         if soup:
             token = self._extract_csrf_token(soup)
 
-        # If token was not found on product page, harvest from Amazon gateway
+        # If token was not found on product page, harvest from search page with desktop headers
         if not token:
             try:
-                r0 = self.session.get("https://www.amazon.in/", headers=self.MOBILE_HEADERS, timeout=12)
+                r0 = self.session.get("https://www.amazon.in/s?k=tv", headers=self.HEADERS, timeout=15)
                 if r0.status_code == 200:
                     soup0 = BeautifulSoup(r0.text, 'html.parser')
                     token = self._extract_csrf_token(soup0)
@@ -363,12 +383,12 @@ class AmazonScraper:
             'locationType': 'LOCATION_INPUT',
             'zipCode': str(pincode),
             'storeContext': 'generic',
-            'deviceType': 'mobile',
+            'deviceType': 'desktop',
             'pageType': 'Detail',
             'actionSource': 'glow',
         }
         post_headers = {
-            'User-Agent': self.MOBILE_HEADERS['User-Agent'],
+            'User-Agent': self.HEADERS['User-Agent'],
             'Accept': 'application/json, text/javascript, */*; q=0.01',
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
             'Referer': referer_url or 'https://www.amazon.in/',
@@ -394,23 +414,22 @@ class AmazonScraper:
             return True
         return self._set_pincode(None, 'https://www.amazon.in/', str(pincode))
 
-    def scrape(self, url: str, model: str = "") -> ProductScrapedData:
-        data = ProductScrapedData(model=model, channel="Amazon", url=url)
+    def _get_current_location_text(self, soup: BeautifulSoup) -> str:
+        """Extracts current delivery location label displayed on page"""
+        loc_el = soup.select_one(
+            '#glow-ingress-line2, .glow-toaster-sub-title, #glow-ingress-block, '
+            '#glow-ingress-single-line, #contextFreeAddress, #nav-global-location-slot'
+        )
+        return loc_el.get_text(' ', strip=True) if loc_el else ""
 
-        # 1. Ensure default pincode (Delhi 110001) is active
-        if self.current_pincode != self.default_pincode:
-            self._ensure_pincode(self.default_pincode)
-
-        # Jitter delay
-        time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
-
-        resp = None
+    def _fetch_page(self, url: str) -> Optional[Any]:
+        """Fetches product page with retries and CAPTCHA handling"""
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 if curl_requests:
-                    resp = self.session.get(url, headers=self.MOBILE_HEADERS, timeout=REQUEST_TIMEOUT, impersonate="safari15_5")
+                    resp = self.session.get(url, headers=self.HEADERS, timeout=REQUEST_TIMEOUT, impersonate="chrome124")
                 else:
-                    resp = self.session.get(url, headers=self.MOBILE_HEADERS, timeout=REQUEST_TIMEOUT)
+                    resp = self.session.get(url, headers=self.HEADERS, timeout=REQUEST_TIMEOUT)
 
                 if resp.status_code == 200:
                     if "captcha" in resp.text.lower() or "type the characters" in resp.text.lower():
@@ -418,101 +437,158 @@ class AmazonScraper:
                         self._init_session()
                         time.sleep(attempt * 2)
                         continue
-                    break
+                    return resp
                 elif resp.status_code == 404:
-                    data.in_stock = False
-                    data.error_msg = "Product 404 Not Found"
-                    return data
+                    return resp
                 elif resp.status_code in (429, 503):
                     time.sleep(attempt * 2)
             except Exception as e:
                 logger.warning(f"[Amazon] Attempt {attempt} failed: {e}")
                 time.sleep(attempt * 1.5)
+        return None
 
-        if not resp or resp.status_code != 200 or "captcha" in resp.text.lower() or "type the characters" in resp.text.lower():
+    def scrape(self, url: str, model: str = "") -> ProductScrapedData:
+        clean_url = normalize_amazon_url(url)
+        data = ProductScrapedData(model=model, channel="Amazon", url=clean_url)
+
+        # 1. Default to Delhi pincode (110001)
+        if self.current_pincode != self.default_pincode:
+            self._ensure_pincode(self.default_pincode)
+
+        time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+
+        resp = self._fetch_page(clean_url)
+        if not resp or resp.status_code != 200:
+            if resp and resp.status_code == 404:
+                data.in_stock = False
+                data.error_msg = "Product 404 Not Found"
+                return data
             data.in_stock = False
             data.error_msg = f"HTTP {resp.status_code if resp else 'No response'} (Blocked/CAPTCHA)"
             return data
 
         soup = BeautifulSoup(resp.text, 'html.parser')
 
-        # 1. Extract Price
+        # 2. Check current delivery location on page
+        # If page does not reflect Delhi delivery, re-apply Delhi pincode and reload
+        loc_text = self._get_current_location_text(soup)
+        if self.default_pincode not in loc_text and "delhi" not in loc_text.lower():
+            logger.info(f"  [Amazon] Initial page location was '{loc_text}'. Setting Delhi ({self.default_pincode})...")
+            self._set_pincode(soup, clean_url, self.default_pincode)
+            time.sleep(0.5)
+            resp_delhi = self._fetch_page(clean_url)
+            if resp_delhi and resp_delhi.status_code == 200:
+                resp = resp_delhi
+                soup = BeautifulSoup(resp.text, 'html.parser')
+
+        # 3. Extract Price, Offers, Coupon, Ratings under Delhi pincode
         data.price = self._extract_price(soup)
-
-        # 2. Extract Bank Offers / Cashback
-        data.bank_offer = self._extract_bank_offers(soup, url, price=data.price)
-
-        # 3. Extract Coupon
+        data.bank_offer = self._extract_bank_offers(soup, clean_url, price=data.price)
         data.coupon = self._extract_coupon(soup, price=data.price, page_text=resp.text)
-
-        # 4. Extract Rating & Review Count
         self._extract_rating_and_reviews(soup, resp.text, data)
-
-        # 5. Check if item is out of stock or missing price in Delhi
         is_oos = self._is_out_of_stock(soup)
-        if data.price is None or is_oos:
-            # Check alternate pincodes (excluding default_pincode which was already checked)
-            alternate_pins = [p for p in AMAZON_PINCODES if str(p) != str(self.default_pincode)]
-            logger.info(f"  [Amazon] Initial check (Pincode {self.default_pincode}): {'OOS' if is_oos else 'No price'}. Checking {len(alternate_pins)} alternate pincodes...")
-            found_stock = False
 
-            for pin in alternate_pins:
-                logger.info(f"    -> Switching to Pincode {pin}...")
-                changed = self._set_pincode(soup, url, str(pin))
-                if not changed:
-                    continue
-                time.sleep(1.0)
-                try:
-                    if curl_requests:
-                        resp_retry = self.session.get(url, headers=self.MOBILE_HEADERS, timeout=REQUEST_TIMEOUT, impersonate="safari15_5")
-                    else:
-                        resp_retry = self.session.get(url, headers=self.MOBILE_HEADERS, timeout=REQUEST_TIMEOUT)
+        # 4. First check: Is it in stock at default Delhi pincode?
+        if data.price is not None and not is_oos:
+            logger.info(f"  [Amazon] IN STOCK at Delhi ({self.default_pincode}) | Price: Rs.{data.price:,}")
+            data.in_stock = True
+            return data
 
-                    if resp_retry.status_code == 200:
-                        soup_retry = BeautifulSoup(resp_retry.text, 'html.parser')
-                        p_retry = self._extract_price(soup_retry)
-                        oos_retry = self._is_out_of_stock(soup_retry)
+        # 5. OOS at default Delhi pincode -> Start switching to alternate pincodes
+        alternate_pins = [p for p in AMAZON_PINCODES if str(p) != str(self.default_pincode)]
+        logger.info(
+            f"  [Amazon] Product is OOS in Delhi ({self.default_pincode}). "
+            f"Switching to alternate pincodes ({len(alternate_pins)} cities)..."
+        )
+        found_stock = False
 
-                        if p_retry and not oos_retry:
-                            logger.info(f"    [Amazon] IN STOCK found at Pincode {pin}! Price: Rs.{p_retry}")
-                            data.price = p_retry
-                            data.in_stock = True
-                            data.bank_offer = self._extract_bank_offers(soup_retry, url, price=p_retry)
-                            data.coupon = self._extract_coupon(soup_retry, price=p_retry, page_text=resp_retry.text)
-                            self._extract_rating_and_reviews(soup_retry, resp_retry.text, data)
-                            found_stock = True
-                            break
-                except Exception as e:
-                    logger.debug(f"    Error checking pincode {pin}: {e}")
+        for pin in alternate_pins:
+            logger.info(f"    -> Switching to Pincode {pin}...")
+            changed = self._set_pincode(soup, clean_url, str(pin))
+            if not changed:
+                continue
+            time.sleep(0.8)
+            resp_retry = self._fetch_page(clean_url)
+            if not resp_retry or resp_retry.status_code != 200:
+                continue
 
-            if not found_stock:
-                logger.info(f"  [Amazon] Out of stock across all checked pincodes. Marked as 'OOS'.")
-                data.in_stock = False
-                data.price = "OOS"
-                data.bank_offer = None
-                data.coupon = 0
+            soup_retry = BeautifulSoup(resp_retry.text, 'html.parser')
+            soup = soup_retry  # update soup for next token
+            p_retry = self._extract_price(soup_retry)
+            oos_retry = self._is_out_of_stock(soup_retry)
 
-            # Switch session back to default Delhi pincode for subsequent products
-            if self.current_pincode != self.default_pincode:
-                self._ensure_pincode(self.default_pincode)
+            if p_retry and not oos_retry:
+                logger.info(f"    [Amazon] IN STOCK found at Pincode {pin}! Price: Rs.{p_retry:,}")
+                data.price = p_retry
+                data.in_stock = True
+                data.bank_offer = self._extract_bank_offers(soup_retry, clean_url, price=p_retry)
+                data.coupon = self._extract_coupon(soup_retry, price=p_retry, page_text=resp_retry.text)
+                self._extract_rating_and_reviews(soup_retry, resp_retry.text, data)
+                found_stock = True
+                break
+
+        if not found_stock:
+            logger.info(f"  [Amazon] Out of stock across all checked pincodes. Marked as 'OOS'.")
+            data.in_stock = False
+            data.price = "OOS"
+            data.bank_offer = None
+            data.coupon = 0
+
+        # Switch session back to default Delhi pincode for subsequent products
+        if self.current_pincode != self.default_pincode:
+            self._set_pincode(soup, clean_url, self.default_pincode)
 
         return data
 
     def _is_out_of_stock(self, soup: BeautifulSoup) -> bool:
-        """Detects whether product is explicitly marked as unavailable/out of stock"""
+        """Detects whether product is explicitly marked as unavailable/out of stock for current location"""
+        # 1. Direct out of stock container
+        oos_el = soup.find(id='outOfStock')
+        if oos_el:
+            txt = oos_el.get_text().lower()
+            if any(term in txt for term in ['currently unavailable', 'out of stock', "don't know when", 'temporarily unavailable', 'temporarily out of stock']):
+                return True
+
+        # 2. Availability element
         avail_el = soup.find(id='availability')
         if avail_el:
             txt = avail_el.get_text().lower()
-            if any(term in txt for term in ['currently unavailable', 'out of stock', "don't know when", 'cannot be dispatched', 'temporarily unavailable']):
+            if any(term in txt for term in [
+                'currently unavailable', 'out of stock', "don't know when",
+                'cannot be dispatched', 'temporarily unavailable', 'temporarily out of stock',
+                'cannot be shipped', 'not deliverable'
+            ]):
                 return True
             if any(term in txt for term in ['in stock', 'usually dispatched', 'only', 'order soon', 'left in stock']):
                 return False
 
-        # Check global dispatch / location block alerts
-        for alert in soup.select('#deliveryBlockMessage, .delivery-message, #delivery-block'):
-            t = alert.get_text().lower()
-            if 'cannot be dispatched to your selected delivery location' in t or 'cannot be delivered' in t:
-                return True
+        # 3. Delivery block restrictions / location delivery message
+        delivery_selectors = [
+            '#deliveryBlockMessage',
+            '#mir-layout-DELIVERY_BLOCK',
+            '.delivery-message',
+            '#delivery-block',
+            '#desktop_buybox .a-alert-error',
+            '#desktop_buybox .a-alert-warning',
+            '#buybox .a-alert-error',
+            '#buybox .a-alert-warning',
+        ]
+        for sel in delivery_selectors:
+            for alert in soup.select(sel):
+                t = alert.get_text().lower()
+                if any(term in t for term in [
+                    'cannot be dispatched to your selected delivery location',
+                    'cannot be delivered',
+                    'cannot be shipped',
+                    'not deliverable',
+                    'select a different delivery location',
+                    'choose a different delivery location',
+                    'no featured offers available',
+                    "can't be delivered",
+                    'delivery is not available',
+                    'delivery not available',
+                ]):
+                    return True
 
         return False
 
