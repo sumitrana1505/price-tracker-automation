@@ -641,56 +641,142 @@ class AmazonScraper:
 
     def _extract_bank_offers(self, soup: BeautifulSoup, url: str = "", price: Optional[int] = None) -> Optional[Union[int, float]]:
         """
-        Extracts the maximum bank offer discount explicitly displayed
-        on the product description page (PDP) cards, excluding any coupon lines.
+        Extracts the maximum authentic bank offer discount explicitly displayed
+        on the product description page (PDP), excluding No Cost EMI interest savings,
+        coupons, and cashbacks.
         """
         offers = []
 
-        # 1. Mobile carousel offer cards (cardification-combo-swatch-card)
+        # 1. Desktop: check for dedicated 'itembox-InstantBankDiscount'
+        box = soup.find(id='itembox-InstantBankDiscount')
+        if not box:
+            for title_el in soup.find_all(class_=re.compile(r'offers-items-title|title')):
+                if title_el.get_text().strip().lower() == 'bank offer':
+                    box = title_el.find_parent(class_=re.compile(r'offers-items|itembox'))
+                    if box:
+                        break
+
+        # If a dedicated Bank Offer box exists, check if vsxOffersSecondaryView modal data is available
+        if box:
+            # Extract ASIN from URL or page
+            asin = ""
+            if url:
+                asin_m = re.search(r'/(?:dp|gp/product)/([A-Z0-9]{10})', url)
+                if asin_m:
+                    asin = asin_m.group(1)
+            if not asin:
+                asin_inp = soup.find('input', id='ASIN')
+                if asin_inp and asin_inp.get('value'):
+                    asin = asin_inp.get('value').strip()
+
+            span = box.find(attrs={'data-side-sheet': True})
+            modal_offers = []
+            if span and asin:
+                try:
+                    side_sheet_data = json.loads(span['data-side-sheet'])
+                    enc_merchant = side_sheet_data.get('encryptedMerchantId', '')
+                    buying_idx = side_sheet_data.get('buyingOptionIndex', 0)
+                    sr = side_sheet_data.get('sr', '')
+                    smid = side_sheet_data.get('smid', '')
+
+                    ajax_url = (
+                        f'https://www.amazon.in/gp/product/ajax/vsxOffersSecondaryView?'
+                        f'asin={asin}&deviceType=web&offerType=InstantBankDiscount&buyingOptionIndex={buying_idx}&'
+                        f'additionalParams=merchantId%3A{enc_merchant}&smid={smid}&encryptedMerchantId={enc_merchant}&'
+                        f'sr={sr}&experienceId=vsxOffersSecondaryView&showFeatures=vsxoffers&'
+                        f'featureParams=OfferType%3AInstantBankDiscount%2CDeviceType%3Aweb'
+                    )
+                    headers = dict(self.HEADERS)
+                    headers['x-requested-with'] = 'XMLHttpRequest'
+                    headers['Referer'] = f'https://www.amazon.in/dp/{asin}'
+                    resp = self.session.get(ajax_url, headers=headers)
+                    if resp.status_code == 200:
+                        sub_soup = BeautifulSoup(resp.text, 'html.parser')
+                        for el in sub_soup.find_all(['h4', 'div', 'p', 'span']):
+                            t = el.get_text(' ', strip=True)
+                            if any(k in t.lower() for k in ['instant discount', 'flat inr', 'additional inr', 'additionalinr']):
+                                if len(t) < 300 and not any(t in o for o in modal_offers):
+                                    modal_offers.append(t)
+                except Exception as e:
+                    logger.debug(f"[Amazon] Error fetching bank offer modal: {e}")
+
+            # If modal offers were retrieved, calculate base + stacked additional discounts
+            if modal_offers:
+                base_emi = 0.0
+                add_emi = 0.0
+                base_non_emi = 0.0
+                add_non_emi = 0.0
+                flat_all = 0.0
+
+                for o in modal_offers:
+                    o_clean = " ".join(o.split())
+                    is_add = bool(re.search(r'additional\s*inr|additionalinr', o_clean, re.I))
+                    is_emi = bool(re.search(r'\bemi\b', o_clean, re.I) and not re.search(r'\bnon[- ]?emi\b', o_clean, re.I))
+                    is_non_emi = bool(re.search(r'\bnon[- ]?emi\b', o_clean, re.I))
+
+                    # Extract discount value (flat, upto, or additional)
+                    amt = None
+                    m_flat = re.search(r'(?:additional\s*inr|additionalinr|flat\s*inr|up\s*to\s*inr|discount\s*of\s*inr)\s*([\d,]+(?:\.\d+)?)', o_clean, re.I)
+                    if m_flat:
+                        amt = float(m_flat.group(1).replace(',', ''))
+                    else:
+                        m_num = re.search(r'inr\s*([\d,]+(?:\.\d+)?)', o_clean, re.I)
+                        if m_num:
+                            amt = float(m_num.group(1).replace(',', ''))
+
+                    # If percentage discount is specified, cap by price % (e.g. 5% up to 1250)
+                    m_pct = re.search(r'(\d+(?:\.\d+)?)\s*%\s*instant discount', o_clean, re.I)
+                    if m_pct and price:
+                        pct_val = (float(m_pct.group(1)) / 100.0) * price
+                        if amt:
+                            amt = min(amt, pct_val)
+                        else:
+                            amt = pct_val
+
+                    if not amt:
+                        continue
+
+                    if is_add:
+                        if is_emi:
+                            add_emi = max(add_emi, amt)
+                        elif is_non_emi:
+                            add_non_emi = max(add_non_emi, amt)
+                        else:
+                            add_emi = max(add_emi, amt)
+                            add_non_emi = max(add_non_emi, amt)
+                    else:
+                        if is_emi:
+                            base_emi = max(base_emi, amt)
+                        elif is_non_emi:
+                            base_non_emi = max(base_non_emi, amt)
+                        else:
+                            flat_all = max(flat_all, amt)
+
+                total_emi = base_emi + add_emi
+                total_non_emi = base_non_emi + add_non_emi
+                offers.extend([total_emi, total_non_emi, flat_all])
+
+            # Also parse the card text on the PDP as candidate / fallback
+            card_text = box.get_text(' ', strip=True)
+            for m in re.findall(r'(?:discount of|upto|flat|off).*?₹\s*([\d,]+(?:\.\d+)?)', card_text, re.IGNORECASE):
+                try:
+                    v = float(m.replace(',', ''))
+                    if 0 < v < 100000:
+                        offers.append(v)
+                except ValueError:
+                    pass
+
+        # 2. Mobile carousel offer cards (cardification-combo-swatch-card) - Bank offers only
         cards = soup.find_all(class_='cardification-combo-swatch-card')
         for card in cards:
-            headers = card.find_all(class_='cardification-combo-header')
-            if headers:
-                for h in headers:
-                    h_classes = h.get('class', [])
-                    h_text = h.get_text(' ', strip=True).lower()
-                    # Skip coupon items inside combo cards
-                    if any('coupon' in c.lower() for c in h_classes) or 'coupon' in h_text:
-                        continue
-                    # Skip cashback items (as established in previous fix for row 202)
-                    if any('cashback' in c.lower() for c in h_classes):
-                        continue
-
-                    money_div = h.find(class_='cardification-combo-header-money')
-                    money_text = money_div.get_text(strip=True) if money_div else h.get_text(strip=True)
-                    m = re.search(r'-\s*₹\s*([\d,]+(?:\.\d+)?)', money_text)
-                    if m:
-                        try:
-                            val = float(m.group(1).replace(',', ''))
-                            if 0 < val < 100000:
-                                offers.append(val)
-                        except ValueError:
-                            pass
-            else:
-                card_lines = card.get_text(separator='\n', strip=True).split('\n')
-                for line in card_lines:
-                    if 'coupon' in line.lower() or 'cashback' in line.lower():
-                        continue
-                    m = re.search(r'-\s*₹\s*([\d,]+(?:\.\d+)?)', line)
-                    if m:
-                        try:
-                            val = float(m.group(1).replace(',', ''))
-                            if 0 < val < 100000:
-                                offers.append(val)
-                        except ValueError:
-                            pass
-
-        # 2. Check standard desktop / mobile offer widgets on PDP
-        for widget in soup.find_all(class_=re.compile(r'vsx-offers|offers-items|bank-offer|sopp-card')):
-            txt = widget.get_text(separator=' ', strip=True)
-            if 'coupon' in txt.lower():
+            c_text = card.get_text(' ', strip=True).lower()
+            # Strictly ensure this card is a Bank Offer and not EMI / Cashback / Coupon / Partner
+            if any(term in c_text for term in ['coupon', 'cashback', 'no cost emi', 'interest savings', 'partner offer', 'gst invoice']):
                 continue
-            for m in re.findall(r'(?:discount of|upto|flat|off|saving).*?₹\s*([\d,]+(?:\.\d+)?)', txt, re.IGNORECASE):
+            if 'bank' not in c_text and 'card' not in c_text:
+                continue
+
+            for m in re.findall(r'(?:discount of|upto|flat|off).*?₹\s*([\d,]+(?:\.\d+)?)', c_text, re.IGNORECASE):
                 try:
                     val = float(m.replace(',', ''))
                     if 0 < val < 100000:
@@ -698,15 +784,28 @@ class AmazonScraper:
                 except ValueError:
                     pass
 
-        if offers:
-            max_val = max(offers)
-            return int(max_val) if max_val == int(max_val) else round(max_val, 2)
+        # 3. Fallback: dedicated bank offer containers (e.g. .bank-offer, .sopp-card), strictly skipping No Cost EMI and Cashback
+        if not offers:
+            for widget in soup.find_all(class_=re.compile(r'bank-offer|sopp-card')):
+                txt = widget.get_text(' ', strip=True)
+                txt_lower = txt.lower()
+                if any(term in txt_lower for term in ['coupon', 'cashback', 'no cost emi', 'interest savings', 'partner offer']):
+                    continue
+                if 'bank' not in txt_lower and 'card' not in txt_lower and 'instant discount' not in txt_lower:
+                    continue
+                for m in re.findall(r'(?:discount of|upto|flat|off).*?₹\s*([\d,]+(?:\.\d+)?)', txt, re.IGNORECASE):
+                    try:
+                        val = float(m.replace(',', ''))
+                        if 0 < val < 100000:
+                            offers.append(val)
+                    except ValueError:
+                        pass
 
-        # 3. Fallback: If no direct card is present but 5% Amazon Pay ICICI cashback applies
-        if price and price > 1000:
-            page_lower = soup.get_text().lower()
-            if 'amazon pay icici' in page_lower and 'cashback' in page_lower:
-                return int(round(price * 0.05))
+        # Return max valid offer
+        valid_offers = [o for o in offers if 0 < o < 100000]
+        if valid_offers:
+            max_val = max(valid_offers)
+            return int(max_val) if max_val == int(max_val) else round(max_val, 2)
 
         return None
 
