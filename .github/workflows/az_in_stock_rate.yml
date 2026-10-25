@@ -2,8 +2,8 @@ name: AZ In_Stock Rate
 
 on:
   schedule:
-    # Runs daily at 04:15 UTC (09:45 AM IST)
-    - cron: '15 4 * * *'
+    # Runs daily at 04:00 UTC (09:30 AM IST)
+    - cron: '0 4 * * *'
   workflow_dispatch:
     inputs:
       custom_date:

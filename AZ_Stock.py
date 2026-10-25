@@ -398,7 +398,8 @@ def sync_to_google_sheet(results_dict: Dict, products: List, city_cols: List, ta
     gc = get_gspread_client()
     spreadsheet_id = os.getenv("GSHEET_SPREADSHEET_ID") or os.getenv("GDRIVE_FILE_ID")
 
-    date_str = target_date or os.getenv("CUSTOM_DATE") or datetime.date.today().strftime('%Y-%m-%d')
+    ist_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+    date_str = target_date or os.getenv("CUSTOM_DATE") or ist_now.strftime('%Y-%m-%d')
 
     # Prepare Philips and Coocaa models based on template rows in ourmodels_pincode.xlsx
     philips_prods = [p for p in products if p[0] <= 13]

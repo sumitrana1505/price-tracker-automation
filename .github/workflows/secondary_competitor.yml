@@ -2,8 +2,8 @@ name: Secondary_Competitor
 
 on:
   schedule:
-    # Runs daily at 03:45 UTC (09:15 AM IST) - separate schedule from Competitor Price Monitoring
-    - cron: '45 3 * * *'
+    # Runs daily at 03:30 UTC (09:00 AM IST)
+    - cron: '30 3 * * *'
   workflow_dispatch:
     inputs:
       custom_date:

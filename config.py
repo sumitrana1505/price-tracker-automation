@@ -1,7 +1,7 @@
 # Configuration settings for Daily Price Tracker Cloud Brain
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # ==========================================
 # FILE & SHEET CONFIGURATION
@@ -94,7 +94,8 @@ def format_today_header(target_dt: datetime = None) -> str:
     Examples: '16th - Oct', '17th - Oct', '1st - Nov', etc.
     """
     if target_dt is None:
-        target_dt = datetime.now()
+        ist_tz = timezone(timedelta(hours=5, minutes=30))
+        target_dt = datetime.now(ist_tz)
     
     day = target_dt.day
     if 11 <= (day % 100) <= 13:

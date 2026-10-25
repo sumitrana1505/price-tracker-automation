@@ -2,8 +2,8 @@ name: oldsheet
 
 on:
   schedule:
-    # Runs daily at 04:45 UTC (10:15 AM IST) - separate schedule for archive sheet tracking
-    - cron: '45 4 * * *'
+    # Runs daily at 04:30 UTC (10:00 AM IST)
+    - cron: '30 4 * * *'
   workflow_dispatch:
     inputs:
       custom_date:

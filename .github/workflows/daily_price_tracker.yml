@@ -2,8 +2,8 @@ name: Competitor Price Monitoring
 
 on:
   schedule:
-    # Runs daily at 03:15 UTC (08:45 AM IST) - offset from :00 to avoid GitHub queue delays
-    - cron: '15 3 * * *'
+    # Runs daily at 03:00 UTC (08:30 AM IST)
+    - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       custom_date:
