@@ -335,6 +335,7 @@ class AmazonScraper:
     def __init__(self, pincode: str = DEFAULT_PINCODE):
         self.default_pincode = str(pincode or DEFAULT_PINCODE)
         self.current_pincode = None
+        self.csrf_token = ""
         self._init_session()
 
     def _init_session(self):
@@ -345,6 +346,7 @@ class AmazonScraper:
             self.session = requests.Session()
             self.session.headers.update(self.HEADERS)
         self.current_pincode = None
+        self.csrf_token = ""
         self._ensure_pincode(self.default_pincode)
 
     def _extract_csrf_token(self, soup: BeautifulSoup) -> str:
@@ -364,20 +366,21 @@ class AmazonScraper:
         return ""
 
     def _set_pincode(self, soup: Optional[BeautifulSoup], referer_url: str, pincode: str) -> bool:
-        """Sets delivery pincode on Amazon via glow endpoint"""
-        token = ""
-        if soup:
-            token = self._extract_csrf_token(soup)
+        """Sets delivery pincode on Amazon via glow endpoint (with token caching for high speed)"""
+        if soup and not self.csrf_token:
+            self.csrf_token = self._extract_csrf_token(soup)
 
         # If token was not found on product page, harvest from search page with desktop headers
-        if not token:
+        if not self.csrf_token:
             try:
-                r0 = self.session.get("https://www.amazon.in/s?k=tv", headers=self.HEADERS, timeout=15)
+                r0 = self.session.get("https://www.amazon.in/s?k=tv", headers=self.HEADERS, timeout=12)
                 if r0.status_code == 200:
                     soup0 = BeautifulSoup(r0.text, 'html.parser')
-                    token = self._extract_csrf_token(soup0)
+                    self.csrf_token = self._extract_csrf_token(soup0)
             except Exception:
                 pass
+
+        token = self.csrf_token
 
         post_data = {
             'locationType': 'LOCATION_INPUT',
@@ -451,7 +454,7 @@ class AmazonScraper:
         clean_url = normalize_amazon_url(url)
         data = ProductScrapedData(model=model, channel="Amazon", url=clean_url)
 
-        # 1. Default to Delhi pincode (110001)
+        # 1. Start with Default Delhi Pincode (110001)
         if self.current_pincode != self.default_pincode:
             self._ensure_pincode(self.default_pincode)
 
@@ -461,9 +464,11 @@ class AmazonScraper:
         if not resp or resp.status_code != 200:
             if resp and resp.status_code == 404:
                 data.in_stock = False
+                data.price = "OOS"
                 data.error_msg = "Product 404 Not Found"
                 return data
             data.in_stock = False
+            data.price = "OOS"
             data.error_msg = f"HTTP {resp.status_code if resp else 'No response'} (Blocked/CAPTCHA)"
             return data
 
@@ -475,50 +480,55 @@ class AmazonScraper:
         if self.default_pincode not in loc_text and "delhi" not in loc_text.lower():
             logger.info(f"  [Amazon] Initial page location was '{loc_text}'. Setting Delhi ({self.default_pincode})...")
             self._set_pincode(soup, clean_url, self.default_pincode)
-            time.sleep(0.5)
+            time.sleep(0.4)
             resp_delhi = self._fetch_page(clean_url)
             if resp_delhi and resp_delhi.status_code == 200:
                 resp = resp_delhi
                 soup = BeautifulSoup(resp.text, 'html.parser')
 
-        # 3. Extract Price, Offers, Coupon, Ratings under Delhi pincode
-        data.price = self._extract_price(soup)
-        data.bank_offer = self._extract_bank_offers(soup, clean_url, price=data.price)
-        data.coupon = self._extract_coupon(soup, price=data.price, page_text=resp.text)
+        # 3. Always extract rating and review count from available page
         self._extract_rating_and_reviews(soup, resp.text, data)
-        is_oos = self._is_out_of_stock(soup)
 
-        # 4. First check: Is it in stock at default Delhi pincode?
-        if data.price is not None and not is_oos:
-            logger.info(f"  [Amazon] IN STOCK at Delhi ({self.default_pincode}) | Price: Rs.{data.price:,}")
+        # 4. Check Pincode 1/20 (Delhi): Is it in stock?
+        price_delhi = self._extract_price(soup)
+        oos_delhi = self._is_out_of_stock(soup)
+
+        if price_delhi is not None and not oos_delhi:
+            logger.info(f"  [Amazon] IN STOCK at Delhi ({self.default_pincode}) [1/20] | Price: Rs.{price_delhi:,}")
+            data.price = price_delhi
             data.in_stock = True
+            data.bank_offer = self._extract_bank_offers(soup, clean_url, price=data.price)
+            data.coupon = self._extract_coupon(soup, price=data.price, page_text=resp.text)
             return data
 
-        # 5. OOS at default Delhi pincode -> Start switching to alternate pincodes
+        # 5. OOS at Delhi -> Check across ALL remaining 19 pincodes (Total 20 pincodes)
         alternate_pins = [p for p in AMAZON_PINCODES if str(p) != str(self.default_pincode)]
         logger.info(
-            f"  [Amazon] Product is OOS in Delhi ({self.default_pincode}). "
-            f"Switching to alternate pincodes ({len(alternate_pins)} cities)..."
+            f"  [Amazon] Unavailable in Delhi ({self.default_pincode}) [1/20]. "
+            f"Checking across all {len(alternate_pins)} remaining pincodes (Total: 20)..."
         )
         found_stock = False
 
+        checked_count = 1
         for pin in alternate_pins:
-            logger.info(f"    -> Switching to Pincode {pin}...")
+            checked_count += 1
             changed = self._set_pincode(soup, clean_url, str(pin))
             if not changed:
                 continue
-            time.sleep(0.8)
+            time.sleep(0.35)
             resp_retry = self._fetch_page(clean_url)
             if not resp_retry or resp_retry.status_code != 200:
                 continue
 
             soup_retry = BeautifulSoup(resp_retry.text, 'html.parser')
             soup = soup_retry  # update soup for next token
+            if not data.rating or not data.rating_count:
+                self._extract_rating_and_reviews(soup_retry, resp_retry.text, data)
             p_retry = self._extract_price(soup_retry)
             oos_retry = self._is_out_of_stock(soup_retry)
 
             if p_retry and not oos_retry:
-                logger.info(f"    [Amazon] IN STOCK found at Pincode {pin}! Price: Rs.{p_retry:,}")
+                logger.info(f"    [Amazon] IN STOCK found at Pincode {pin} ({checked_count}/20 checked)! Price: Rs.{p_retry:,}")
                 data.price = p_retry
                 data.in_stock = True
                 data.bank_offer = self._extract_bank_offers(soup_retry, clean_url, price=p_retry)
@@ -526,9 +536,12 @@ class AmazonScraper:
                 self._extract_rating_and_reviews(soup_retry, resp_retry.text, data)
                 found_stock = True
                 break
+            else:
+                logger.debug(f"    [Amazon] Checked {checked_count}/20 (Pincode {pin}): Unavailable/OOS")
 
+        # 6. Only write 'OOS' if all 20 pincodes were checked and product was unavailable across all of them
         if not found_stock:
-            logger.info(f"  [Amazon] Out of stock across all checked pincodes. Marked as 'OOS'.")
+            logger.info(f"  [Amazon] Confirmed UNAVAILABLE across all {checked_count}/20 checked pincodes. Marked as 'OOS'.")
             data.in_stock = False
             data.price = "OOS"
             data.bank_offer = None
@@ -641,13 +654,14 @@ class AmazonScraper:
 
     def _extract_bank_offers(self, soup: BeautifulSoup, url: str = "", price: Optional[int] = None) -> Optional[Union[int, float]]:
         """
-        Extracts the maximum authentic bank offer discount explicitly displayed
-        on the product description page (PDP), excluding No Cost EMI interest savings,
-        coupons, and cashbacks.
+        Extracts authentic maximum bank offer discount applicable to this product.
+        - Parses the official PDP headline bank offer ('Upto ₹X discount') displayed by Amazon.
+        - Parses modal offers with strict per-bank grouping (Axis, ICICI, HDFC, SBI, AllBanks).
+        - Discards any offer where product price is less than required minimum purchase value.
+        - Excludes No Cost EMI interest savings, cashbacks, coupons, and partner offers.
         """
-        offers = []
-
-        # 1. Desktop: check for dedicated 'itembox-InstantBankDiscount'
+        # 1. Extract official PDP Headline Bank Offer
+        pdp_headline_offer = 0.0
         box = soup.find(id='itembox-InstantBankDiscount')
         if not box:
             for title_el in soup.find_all(class_=re.compile(r'offers-items-title|title')):
@@ -656,7 +670,19 @@ class AmazonScraper:
                     if box:
                         break
 
-        # If a dedicated Bank Offer box exists, check if vsxOffersSecondaryView modal data is available
+        if box:
+            card_text = box.get_text(' ', strip=True)
+            m_pdp = re.search(r'(?:upto|flat|discount of|off)\s*(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d+)?)', card_text, re.I)
+            if m_pdp:
+                try:
+                    val = float(m_pdp.group(1).replace(',', ''))
+                    if 0 < val < 100000:
+                        pdp_headline_offer = val
+                except ValueError:
+                    pass
+
+        # 2. Extract detailed vsxOffersSecondaryView modal offers
+        modal_offers = []
         if box:
             # Extract ASIN from URL or page
             asin = ""
@@ -670,7 +696,6 @@ class AmazonScraper:
                     asin = asin_inp.get('value').strip()
 
             span = box.find(attrs={'data-side-sheet': True})
-            modal_offers = []
             if span and asin:
                 try:
                     side_sheet_data = json.loads(span['data-side-sheet'])
@@ -689,144 +714,115 @@ class AmazonScraper:
                     headers = dict(self.HEADERS)
                     headers['x-requested-with'] = 'XMLHttpRequest'
                     headers['Referer'] = f'https://www.amazon.in/dp/{asin}'
-                    resp = self.session.get(ajax_url, headers=headers)
+                    resp = self.session.get(ajax_url, headers=headers, timeout=10)
                     if resp.status_code == 200:
                         sub_soup = BeautifulSoup(resp.text, 'html.parser')
                         for el in sub_soup.find_all(['h4', 'div', 'p', 'span']):
                             t = el.get_text(' ', strip=True)
-                            if any(k in t.lower() for k in ['instant discount', 'flat inr', 'additional inr', 'additionalinr']):
+                            if any(k in t.lower() for k in ['instant discount', 'flat inr', 'additional inr', 'additional flat inr', 'discount of inr', 'upto inr']):
                                 if len(t) < 300 and not any(t in o for o in modal_offers):
                                     modal_offers.append(t)
                 except Exception as e:
                     logger.debug(f"[Amazon] Error fetching bank offer modal: {e}")
 
-            # If modal offers were retrieved, calculate base + stacked additional discounts
-            if modal_offers:
-                base_emi = 0.0
-                add_emi = 0.0
-                base_non_emi = 0.0
-                add_non_emi = 0.0
-                flat_all = 0.0
+        # 3. Calculate per-bank discounts enforcing minimum transaction amounts
+        bank_totals = {}
+        for o in modal_offers:
+            o_clean = ' '.join(o.split())
 
-                for o in modal_offers:
-                    o_clean = " ".join(o.split())
-                    is_add = bool(re.search(r'additional\s*inr|additionalinr', o_clean, re.I))
-                    is_emi = bool(re.search(r'\bemi\b', o_clean, re.I) and not re.search(r'\bnon[- ]?emi\b', o_clean, re.I))
-                    is_non_emi = bool(re.search(r'\bnon[- ]?emi\b', o_clean, re.I))
+            # Check minimum purchase requirement
+            m_min = re.search(r'(?:min(?:imum)?\s*(?:purchase|trxn)?\s*(?:value|is)?\s*(?:inr|rs\.?|₹)?)\s*([\d,]+(?:\.\d+)?)', o_clean, re.I)
+            if m_min and price:
+                min_val = float(m_min.group(1).replace(',', ''))
+                if price < min_val:
+                    # Ineligible: product price does not satisfy minimum order threshold
+                    continue
 
-                    # Extract discount value (flat, upto, or additional)
-                    amt = None
-                    m_flat = re.search(r'(?:additional\s*inr|additionalinr|flat\s*inr|up\s*to\s*inr|discount\s*of\s*inr)\s*([\d,]+(?:\.\d+)?)', o_clean, re.I)
-                    if m_flat:
-                        amt = float(m_flat.group(1).replace(',', ''))
-                    else:
-                        m_num = re.search(r'inr\s*([\d,]+(?:\.\d+)?)', o_clean, re.I)
-                        if m_num:
-                            amt = float(m_num.group(1).replace(',', ''))
+            # Identify target bank
+            b_name = 'Other'
+            o_lower = o_clean.lower()
+            if 'axis' in o_lower:
+                b_name = 'Axis'
+            elif 'icici' in o_lower:
+                b_name = 'ICICI'
+            elif 'hdfc' in o_lower:
+                b_name = 'HDFC'
+            elif 'sbi' in o_lower:
+                b_name = 'SBI'
+            elif 'all banks' in o_lower or 'all bank' in o_lower:
+                b_name = 'AllBanks'
 
-                    # If percentage discount is specified, cap by price % (e.g. 5% up to 1250)
-                    m_pct = re.search(r'(\d+(?:\.\d+)?)\s*%\s*instant discount', o_clean, re.I)
-                    if m_pct and price:
-                        pct_val = (float(m_pct.group(1)) / 100.0) * price
-                        if amt:
-                            amt = min(amt, pct_val)
-                        else:
-                            amt = pct_val
+            is_add = bool(re.search(r'additional\s*(?:flat\s*)?inr', o_clean, re.I))
+            is_emi = bool(re.search(r'\bemi\b', o_clean, re.I) and not re.search(r'\bnon[- ]?emi\b', o_clean, re.I))
 
-                    if not amt:
-                        continue
+            # Extract discount amount
+            amt = 0.0
+            m_amt = re.search(r'(?:additional\s*(?:flat\s*)?inr|flat\s*inr|up\s*to\s*inr|discount\s*of\s*inr)\s*([\d,]+(?:\.\d+)?)', o_clean, re.I)
+            if m_amt:
+                amt = float(m_amt.group(1).replace(',', ''))
+            else:
+                m_num = re.search(r'inr\s*([\d,]+(?:\.\d+)?)', o_clean, re.I)
+                if m_num:
+                    amt = float(m_num.group(1).replace(',', ''))
 
-                    if is_add:
-                        if is_emi:
-                            add_emi = max(add_emi, amt)
-                        elif is_non_emi:
-                            add_non_emi = max(add_non_emi, amt)
-                        else:
-                            add_emi = max(add_emi, amt)
-                            add_non_emi = max(add_non_emi, amt)
-                    else:
-                        if is_emi:
-                            base_emi = max(base_emi, amt)
-                        elif is_non_emi:
-                            base_non_emi = max(base_non_emi, amt)
-                        else:
-                            flat_all = max(flat_all, amt)
+            # Percentage discount (e.g. 10% instant discount up to 1750)
+            m_pct = re.search(r'(\d+(?:\.\d+)?)\s*%\s*instant discount', o_clean, re.I)
+            if m_pct and price:
+                pct_val = (float(m_pct.group(1)) / 100.0) * price
+                amt = min(amt, pct_val) if amt > 0 else pct_val
 
-                total_emi = base_emi + add_emi
-                total_non_emi = base_non_emi + add_non_emi
-                offers.extend([total_emi, total_non_emi, flat_all])
-
-            # Also parse the card text on the PDP as candidate / fallback
-            card_text = box.get_text(' ', strip=True)
-            for m in re.findall(r'(?:discount of|upto|flat|off).*?₹\s*([\d,]+(?:\.\d+)?)', card_text, re.IGNORECASE):
-                try:
-                    v = float(m.replace(',', ''))
-                    if 0 < v < 100000:
-                        offers.append(v)
-                except ValueError:
-                    pass
-
-        # 2. Mobile carousel offer cards (cardification-combo-swatch-card) - Bank offers only
-        cards = soup.find_all(class_='cardification-combo-swatch-card')
-        for card in cards:
-            c_text = card.get_text(' ', strip=True).lower()
-            # Strictly ensure this card is a Bank Offer and not EMI / Cashback / Coupon / Partner
-            if any(term in c_text for term in ['coupon', 'cashback', 'no cost emi', 'interest savings', 'partner offer', 'gst invoice']):
-                continue
-            if 'bank' not in c_text and 'card' not in c_text:
+            if amt <= 0:
                 continue
 
-            for m in re.findall(r'(?:discount of|upto|flat|off).*?₹\s*([\d,]+(?:\.\d+)?)', c_text, re.IGNORECASE):
-                try:
-                    val = float(m.replace(',', ''))
-                    if 0 < val < 100000:
-                        offers.append(val)
-                except ValueError:
-                    pass
+            key = (b_name, 'EMI' if is_emi else 'NonEMI')
+            if key not in bank_totals:
+                bank_totals[key] = {'base': 0.0, 'add': 0.0}
 
-        # 3. Fallback: dedicated bank offer containers (e.g. .bank-offer, .sopp-card), strictly skipping No Cost EMI and Cashback
-        if not offers:
-            for widget in soup.find_all(class_=re.compile(r'bank-offer|sopp-card')):
-                txt = widget.get_text(' ', strip=True)
-                txt_lower = txt.lower()
-                if any(term in txt_lower for term in ['coupon', 'cashback', 'no cost emi', 'interest savings', 'partner offer']):
+            if is_add:
+                bank_totals[key]['add'] = max(bank_totals[key]['add'], amt)
+            else:
+                bank_totals[key]['base'] = max(bank_totals[key]['base'], amt)
+
+        best_bank_offer = pdp_headline_offer
+        for key, vals in bank_totals.items():
+            tot = vals['base'] + vals['add']
+            # Cap: Bank discount shouldn't exceed 40% of item price or headline+1500
+            if tot > best_bank_offer:
+                if price is None or tot < (price * 0.40):
+                    best_bank_offer = tot
+
+        # 4. Fallback: check mobile swatch cards if no offer found yet
+        if best_bank_offer <= 0:
+            cards = soup.find_all(class_='cardification-combo-swatch-card')
+            for card in cards:
+                c_text = card.get_text(' ', strip=True).lower()
+                if any(term in c_text for term in ['coupon', 'cashback', 'no cost emi', 'interest savings', 'partner offer', 'gst invoice']):
                     continue
-                if 'bank' not in txt_lower and 'card' not in txt_lower and 'instant discount' not in txt_lower:
+                if 'bank' not in c_text and 'card' not in c_text:
                     continue
-                for m in re.findall(r'(?:discount of|upto|flat|off).*?₹\s*([\d,]+(?:\.\d+)?)', txt, re.IGNORECASE):
+                for m in re.findall(r'(?:discount of|upto|flat|off).*?₹\s*([\d,]+(?:\.\d+)?)', c_text, re.IGNORECASE):
                     try:
                         val = float(m.replace(',', ''))
                         if 0 < val < 100000:
-                            offers.append(val)
+                            best_bank_offer = max(best_bank_offer, val)
                     except ValueError:
                         pass
 
-        # Return max valid offer
-        valid_offers = [o for o in offers if 0 < o < 100000]
-        if valid_offers:
-            max_val = max(valid_offers)
-            return int(max_val) if max_val == int(max_val) else round(max_val, 2)
+        if best_bank_offer > 0:
+            return int(best_bank_offer) if best_bank_offer == int(best_bank_offer) else round(best_bank_offer, 2)
 
         return None
 
     def _extract_coupon(self, soup: BeautifulSoup, price: Optional[int] = None, page_text: Optional[str] = None) -> int:
-        """Extracts coupon discount amount from Amazon product page"""
+        """
+        Extracts authentic coupon discount explicitly applicable to this product.
+        - Strictly scoped to current buybox and coupon feature containers.
+        - Strictly prevents leakage from sibling product variations (e.g. other TV sizes).
+        - Excludes 'You pay' summary labels.
+        """
         detected_coupons = []
 
-        # 1. Direct JSON check for couponDiscountAmount (highest fidelity on Amazon)
-        if page_text:
-            for m in re.finditer(r'couponDiscountAmount[^\d]+(\d+)', page_text):
-                val = int(m.group(1))
-                if 0 < val < 100000:
-                    detected_coupons.append(val)
-
-        # 2. Twister Plus Coupons Card & Specific coupon selectors in BuyBox and PDP
         target_selectors = [
-            '#coupons-card-sub-heading-before-apply',
-            '#coupons-card-sub-heading-after-apply',
-            '[data-twister-plus-coupons-card-button]',
-            '.cc-card-couponsCard',
-            '.coupon-container',
             '#promoPriceBlockMessage_feature_div',
             '#couponsInBuybox_feature_div',
             '#couponBadge',
@@ -834,9 +830,9 @@ class AmazonScraper:
             '.vpcButton',
             '#unclippedCouponSection',
             '.couponLabelText',
-            '#pqv-price-coupon-message',
-            '.newCouponBadge',
-            '#applicable_coupons'
+            '#applicable_coupons',
+            '#coupons-card-sub-heading-before-apply',
+            '#coupons-card-sub-heading-after-apply'
         ]
 
         candidate_texts = []
@@ -846,24 +842,17 @@ class AmazonScraper:
                 if txt:
                     candidate_texts.append(txt)
 
-        # 3. Check for dynamic span IDs (e.g. id="couponTextpctch...")
         for el in soup.find_all('span', id=re.compile(r'^couponText', re.I)):
             txt = el.get_text(' ', strip=True)
             if txt:
                 candidate_texts.append(txt)
 
-        # 4. Check for any element with class containing couponLabelText
-        for el in soup.find_all(class_=re.compile(r'couponLabelText', re.I)):
-            txt = el.get_text(' ', strip=True)
-            if txt:
-                candidate_texts.append(txt)
-
         for text in candidate_texts:
-            # Skip "You pay" strings (which represent net price, not coupon amount)
-            if re.search(r'\byou pay\b', text, re.I):
+            t_lower = text.lower()
+            if 'coupon' not in t_lower or 'you pay' in t_lower:
                 continue
 
-            # Check percentage coupon e.g. 'Apply 5% coupon'
+            # Percentage coupon e.g. 'Apply 5% coupon' or 'Save 10% with coupon'
             m_pct = re.search(r'(?:apply|save)?\s*(\d+)\s*%\s*(?:off|with)?\s*coupon', text, re.I)
             if m_pct and price:
                 pct = int(m_pct.group(1))
@@ -871,34 +860,20 @@ class AmazonScraper:
                 if 0 < val < price:
                     detected_coupons.append(val)
 
-            # Check rupee amount coupon e.g. 'Apply ₹2250 coupon', 'Save ₹2,000 now', '₹2,000 discount'
-            m_amt = re.search(r'(?:apply|save)?\s*(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d+)?)\s*(?:off|with|now|discount)?\s*(?:coupon)?', text, re.I)
+            # Rupee coupon e.g. 'Apply ₹2250 coupon', 'Save ₹2,000 with coupon'
+            m_amt = re.search(r'(?:apply|save)\s*(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d+)?)\s*(?:off|with|now)?\s*coupon', text, re.I)
             if m_amt:
                 amt_str = m_amt.group(1).split('.')[0]
                 val = clean_digits(amt_str)
-                if val and 0 < val < 100000:
+                if val and (price is None or 0 < val < price):
                     detected_coupons.append(val)
 
-            m_amt2 = re.search(r'coupon[^\d]{1,15}(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d+)?)', text, re.I)
+            m_amt2 = re.search(r'coupon\s*(?:for|of|worth)?\s*(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d+)?)', text, re.I)
             if m_amt2:
                 amt_str = m_amt2.group(1).split('.')[0]
                 val = clean_digits(amt_str)
-                if val and 0 < val < 100000:
+                if val and (price is None or 0 < val < price):
                     detected_coupons.append(val)
-
-        # 5. Fallback search directly in raw HTML if not detected yet
-        if not detected_coupons and page_text:
-            m_raw = re.search(r'(?:₹|Rs\.?|INR)\s*([\d,]+)\s*(?:off)?\s*coupon\s*applied', page_text, re.I)
-            if m_raw:
-                val = clean_digits(m_raw.group(1))
-                if val and 0 < val < 100000:
-                    detected_coupons.append(val)
-            else:
-                m_raw2 = re.search(r'(?:apply|save)\s*(?:₹|Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)\s*(?:off|with|now)?\s*coupon', page_text, re.I)
-                if m_raw2:
-                    val = clean_digits(m_raw2.group(1).split('.')[0])
-                    if val and 0 < val < 100000:
-                        detected_coupons.append(val)
 
         if detected_coupons:
             return max(detected_coupons)

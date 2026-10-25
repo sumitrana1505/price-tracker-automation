@@ -74,7 +74,27 @@ SUB_HEADERS = [
 # Scraping settings
 DEFAULT_PINCODE = "110001"       # Delhi
 AMAZON_PINCODES = [
-    "110001", "400001", "560001", "700001", "600001", "500001", "411001", "380001"
+    # Exactly 20 major delivery pincodes across India covering all zones
+    "110001",  # 1.  Delhi (Central) - Primary default
+    "110031",  # 2.  Delhi (East)
+    "400001",  # 3.  Mumbai (South)
+    "400008",  # 4.  Mumbai (Central)
+    "560001",  # 5.  Bangalore (Central)
+    "560038",  # 6.  Bangalore (East)
+    "500001",  # 7.  Hyderabad (Central)
+    "500032",  # 8.  Hyderabad (West)
+    "411001",  # 9.  Pune (Central)
+    "411003",  # 10. Pune (North)
+    "600001",  # 11. Chennai (North)
+    "600003",  # 12. Chennai (Central)
+    "700001",  # 13. Kolkata (Central)
+    "700032",  # 14. Kolkata (South)
+    "380001",  # 15. Ahmedabad
+    "226001",  # 16. Lucknow
+    "800001",  # 17. Patna
+    "462001",  # 18. Bhopal
+    "781001",  # 19. Guwahati
+    "641001",  # 20. Coimbatore
 ]
 REQUEST_TIMEOUT = 25
 DELAY_MIN = 1.5
