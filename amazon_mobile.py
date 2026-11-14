@@ -624,5 +624,45 @@ def fetch_many(asins, concurrency=CONCURRENCY, log=print):
     return run_async(_fetch_many(asins, concurrency, log))
 
 
+async def _fetch_ratings(asins, concurrency, log):
+    f = Fetcher(concurrency)
+    session = AsyncSession(impersonate=IMPERSONATE, headers=HEADERS, max_clients=concurrency)
+    out, done = {}, 0
+
+    async def work(asin):
+        nonlocal done
+        res = {"rating": None, "reviews": None, "error": None}
+        try:
+            d = parse_product(await f._get(session, f"{BASE}/gp/aw/d/{asin}?th=1&psc=1"), "-")
+            res["rating"], res["reviews"] = d["rating"], d["reviews"]
+            if d["rating"] is None:
+                res["error"] = "no rating on page"
+        except NotFound:
+            res["error"] = "page not found"
+        except Exception as e:
+            res["error"] = f"{type(e).__name__}: {e}"[:80]
+        done += 1
+        if log:
+            log(f"[Amazon {done}/{len(asins)}] {asin} rating={res['rating']} ({res['reviews']})"
+                + (f" | {res['error']}" if res["error"] else ""))
+        out[asin] = res
+
+    try:
+        await asyncio.gather(*(work(a) for a in asins))
+    finally:
+        await session.close()
+    return out
+
+
+def fetch_ratings(asins, concurrency=CONCURRENCY, log=print):
+    """Star rating + rating count for many ASINs. One page per product and no pincode
+    handling (ratings do not depend on the delivery location).
+    Returns {asin: {'rating', 'reviews', 'error'}}."""
+    asins = list(dict.fromkeys(a for a in asins if a))
+    if not asins:
+        return {}
+    return run_async(_fetch_ratings(asins, concurrency, log))
+
+
 if __name__ == "__main__":
     run_async(main())

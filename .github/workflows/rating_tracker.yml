@@ -1,0 +1,50 @@
+name: Rating tracker
+
+on:
+  schedule:
+    # Runs daily at 03:30 UTC (09:00 AM IST)
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+    inputs:
+      custom_date:
+        description: 'Date to fill as YYYY-MM-DD (leave blank for today)'
+        required: false
+        default: ''
+      test_limit:
+        description: 'Limit number of products (leave blank to run all)'
+        required: false
+        default: ''
+
+jobs:
+  track-ratings:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Fill Today's Ratings in Google Sheet
+        env:
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          # Spreadsheet that holds the 'Ratings Tracker' tab. Uses RATING_SPREADSHEET_ID when
+          # that secret exists, otherwise the same spreadsheet as the price tracker.
+          RATING_SPREADSHEET_ID: ${{ secrets.RATING_SPREADSHEET_ID || secrets.GSHEET_SPREADSHEET_ID }}
+          RATING_SHEET: 'Ratings Tracker'
+          CUSTOM_DATE: ${{ github.event.inputs.custom_date }}
+          TEST_LIMIT: ${{ github.event.inputs.test_limit }}
+        run: |
+          python rating_tracker.py
