@@ -241,6 +241,27 @@ class GoogleSheetPriceTrackerBrain:
         fail_count = 0
         t0 = time.time()
 
+        # Fetch every Amazon product of this sheet concurrently up front (mobile site,
+        # Mumbai -> Bangalore/Delhi/Hyderabad -> remaining pincodes). The loop below then
+        # only reads the stored results.
+        amazon_links = []
+        counted = 0
+        for r in range(FIRST_DATA_ROW, min(last_data_row + 1, len(all_rows) + 1)):
+            row_data = all_rows[r - 1]
+            ch_l = row_data[COL_CHANNEL - 1].strip().lower() if len(row_data) >= COL_CHANNEL else ""
+            lnk = row_data[COL_LINK - 1].strip() if len(row_data) >= COL_LINK else ""
+            if not lnk.startswith("http"):
+                continue
+            if test_limit and counted >= test_limit:
+                break
+            counted += 1
+            if "flipkart" in ch_l or "flipkart" in lnk:
+                continue
+            if "amazon" in ch_l or "amazon" in lnk:
+                amazon_links.append(lnk)
+        if amazon_links and hasattr(self.amz_scraper, "prefetch"):
+            self.amz_scraper.prefetch(amazon_links)
+
         for r in range(FIRST_DATA_ROW, min(last_data_row + 1, len(all_rows) + 1)):
             row_data = all_rows[r - 1] if (r - 1) < len(all_rows) else []
             channel = row_data[COL_CHANNEL - 1].strip() if len(row_data) >= COL_CHANNEL else ""
@@ -298,6 +319,19 @@ class GoogleSheetPriceTrackerBrain:
                     f"Rating: {scraped.rating} ({scraped.rating_count or 0})"
                 )
                 success_count += 1
+            elif scraped and getattr(scraped, "fetch_error", False):
+                # could not be fetched at any pincode (blocked / timeout): leave the price
+                # blank instead of writing a false 'OOS'
+                cells_to_update.extend([
+                    gspread.Cell(r, col_price, ""),
+                    gspread.Cell(r, col_bank, ""),
+                    gspread.Cell(r, col_coupon, 0),
+                    gspread.Cell(r, col_nep, nep_formula),
+                    gspread.Cell(r, col_rating, scraped.rating if scraped.rating else ""),
+                    gspread.Cell(r, col_rc, scraped.rating_count if scraped.rating_count else ""),
+                ])
+                logger.warning(f"  [FETCH ERROR] {scraped.error_msg} - price left blank")
+                fail_count += 1
             elif scraped and (scraped.price == "OOS" or not scraped.in_stock):
                 cells_to_update.extend([
                     gspread.Cell(r, col_price, "OOS"),

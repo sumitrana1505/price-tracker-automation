@@ -46,6 +46,7 @@ class ProductScrapedData:
     rating: Optional[float] = None
     rating_count: Optional[int] = None
     error_msg: str = ""
+    fetch_error: bool = False  # True = could not be fetched (blocked/timeout), NOT a confirmed OOS
 
 
 # ─────────────────────────────────────────────────────────────
@@ -312,7 +313,91 @@ class FlipkartScraper:
 # ─────────────────────────────────────────────────────────────
 
 class AmazonScraper:
-    """High-reliability scraper for Amazon India product pages with dynamic pincode switching"""
+    """
+    Amazon India scraper backed by amazon_mobile.py (mobile site, async, pincode aware).
+
+    Pincode order: Mumbai first; if out of stock -> Bangalore, Delhi, Hyderabad in parallel;
+    still out of stock -> all remaining pincodes in parallel. Failed pincodes are retried.
+    'OOS' is returned only when no pincode has stock (or the product page is gone).
+
+    Call prefetch(links) once with every Amazon link of the sheet: all products are then
+    fetched concurrently and scrape() just returns the stored result.
+    """
+
+    def __init__(self, pincode: str = DEFAULT_PINCODE):
+        self._results: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _asin(url: str) -> str:
+        m = re.search(r'/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})', normalize_amazon_url(url) or "")
+        return m.group(1) if m else ""
+
+    def prefetch(self, urls: List[str]) -> None:
+        """Fetch all given Amazon product links concurrently and keep the results."""
+        import amazon_mobile
+        asins = [a for a in dict.fromkeys(self._asin(u) for u in urls) if a and a not in self._results]
+        if not asins:
+            return
+        logger.info(f"[Amazon] Fetching {len(asins)} products concurrently (mobile site, 15 pincodes)...")
+        t0 = time.time()
+        try:
+            self._results.update(amazon_mobile.fetch_many(asins, log=logger.info))
+        except Exception as e:
+            logger.error(f"[Amazon] Concurrent fetch failed: {e}")
+        logger.info(f"[Amazon] Fetched {len(asins)} products in {time.time() - t0:.1f}s")
+
+    def scrape(self, url: str, model: str = "") -> ProductScrapedData:
+        clean_url = normalize_amazon_url(url)
+        data = ProductScrapedData(model=model, channel="Amazon", url=clean_url)
+        asin = self._asin(url)
+        if not asin:
+            data.in_stock = False
+            data.error_msg = "No ASIN found in link"
+            return data
+
+        if asin not in self._results:
+            self.prefetch([url])
+        res = self._results.get(asin)
+        if not res:
+            data.in_stock = False
+            data.fetch_error = True
+            data.error_msg = "Fetch failed"
+            return data
+
+        status = str(res.get("status", ""))
+        data.rating = res.get("rating")
+        data.rating_count = res.get("reviews")
+
+        if status == "In Stock" and isinstance(res.get("price"), int):
+            price = res["price"]
+            data.in_stock = True
+            data.price = price
+            # highest of bank discount and cashback (same as the Bank Offer column of primary_fetch)
+            data.bank_offer = res.get("max_offer") or None
+            coupon = res.get("coupon") or 0
+            if isinstance(coupon, str):                       # e.g. "5%"
+                pct = clean_float(coupon)
+                coupon = int(round(price * pct / 100.0)) if pct else 0
+            data.coupon = int(coupon) if 0 < coupon < price else 0
+            if res.get("city"):
+                logger.info(f"  [Amazon] In stock at {res['city']} ({res.get('pincode')})")
+        elif status.startswith("OOS"):
+            data.in_stock = False
+            data.price = "OOS"
+            data.bank_offer = None
+            data.coupon = 0
+            data.error_msg = status
+        else:
+            # every pincode failed (blocked / timeout) - this is NOT a confirmed out-of-stock
+            data.in_stock = False
+            data.fetch_error = True
+            data.error_msg = status or "Fetch failed"
+            logger.warning(f"  [Amazon] {asin}: {data.error_msg}")
+        return data
+
+
+class AmazonDesktopScraper:
+    """Previous desktop-page scraper (sequential, 20 pincodes). Kept for reference; not used."""
 
     HEADERS = {
         'User-Agent': (

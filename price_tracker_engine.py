@@ -183,6 +183,28 @@ class PriceTrackerBrain:
         fail_count = 0
         t0 = time.time()
 
+        # Fetch every Amazon product of this sheet concurrently up front (mobile site,
+        # Mumbai -> Bangalore/Delhi/Hyderabad -> remaining pincodes). The loop below then
+        # only reads the stored results.
+        amazon_links = []
+        counted = 0
+        for item in rows_to_process:
+            lnk = item["link"]
+            if not lnk.startswith("http"):
+                continue
+            if skip_existing and ws.cell(item["row"], col_price).value is not None:
+                continue
+            if test_limit and counted >= test_limit:
+                break
+            counted += 1
+            ch_l = item["channel"].lower()
+            if "flipkart" in ch_l or "flipkart" in lnk:
+                continue
+            if "amazon" in ch_l or "amazon" in lnk:
+                amazon_links.append(lnk)
+        if amazon_links and hasattr(self.amz_scraper, "prefetch"):
+            self.amz_scraper.prefetch(amazon_links)
+
         for item in rows_to_process:
             r = item["row"]
             ch = item["channel"].lower()
@@ -241,6 +263,16 @@ class PriceTrackerBrain:
                     f"Rating: {scraped_data.rating} ({scraped_data.rating_count or 0})"
                 )
                 success_count += 1
+            elif scraped_data and getattr(scraped_data, "fetch_error", False):
+                # could not be fetched at any pincode (blocked / timeout): leave the price
+                # blank instead of writing a false 'OOS'
+                logger.warning(f"  [FETCH ERROR] {scraped_data.error_msg} - price left blank")
+                ws.cell(r, col_price, None)
+                ws.cell(r, col_bank, None)
+                ws.cell(r, col_coupon, 0)
+                ws.cell(r, col_rating, scraped_data.rating)
+                ws.cell(r, col_rc, scraped_data.rating_count)
+                fail_count += 1
             elif scraped_data and (scraped_data.price == "OOS" or not scraped_data.in_stock):
                 logger.info(f"  [OOS] Marked as OOS across all pincodes | Rating: {scraped_data.rating} ({scraped_data.rating_count or 0})")
                 ws.cell(r, col_price, "OOS")
