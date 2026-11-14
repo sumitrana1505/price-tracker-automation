@@ -9,7 +9,9 @@ Every run:
   1. finds today's date column in row 1, or adds a new one right after the last date
      (the new column takes the formatting of the column before it),
   2. fetches the current star rating of every product link (Flipkart + Amazon),
-  3. writes the ratings into today's column.
+  3. writes the ratings into today's column,
+  4. highlights the cell Light Green 3 when the rating went up against the previous
+     column and Light Red 3 when it dropped.
 
 A product whose rating could not be fetched is left blank (an existing value is never erased).
 
@@ -153,6 +155,91 @@ def fetch_ratings(products: List[Dict[str, Any]]) -> Dict[int, float]:
     return ratings
 
 
+def column_backgrounds(sh, ws, col: int, first_row: int, last_row: int) -> Dict[int, Dict[str, float]]:
+    """{row: background colour as displayed} for one column of the sheet."""
+    letter = col_to_letter(col)
+    title = ws.title.replace("'", "''")
+    meta = sh.fetch_sheet_metadata(params={
+        "ranges": [f"'{title}'!{letter}{first_row}:{letter}{last_row}"],
+        "fields": "sheets(data(rowData(values(effectiveFormat(backgroundColor)))))",
+    })
+    row_data = meta["sheets"][0]["data"][0].get("rowData", [])
+    out = {}
+    for r in range(first_row, last_row + 1):
+        i = r - first_row
+        values = row_data[i].get("values", []) if i < len(row_data) else []
+        bg = (values[0].get("effectiveFormat", {}).get("backgroundColor") if values else None) or {}
+        # the API leaves out channels that are 0; no colour at all means plain white
+        out[r] = ({"red": bg.get("red", 0.0), "green": bg.get("green", 0.0), "blue": bg.get("blue", 0.0)}
+                  if bg else {"red": 1.0, "green": 1.0, "blue": 1.0})
+    return out
+
+
+def highlight_rating_changes(sh, ws, col: int, ratings: Dict[int, float], last_row: int):
+    """
+    Compares today's rating with the previous column (the previous day):
+      rating increased -> Light Green 3 fill, rating dropped -> Light Red 3 fill.
+    Every other cell of today's column gets the sheet's normal background for its row
+    (taken from the first date column), so yesterday's highlights are not carried over
+    and the sheet's own formatting stays as it is.
+    """
+    from gsheet_engine import LIGHT_RED_3, LIGHT_GREEN_3
+
+    prev_col = col - 1
+    if prev_col < FIRST_DATE_COL:
+        logger.info("No previous date column - skipping rating-change highlighting.")
+        return
+    prev_letter = col_to_letter(prev_col)
+    prev_rows = ws.get(f"{prev_letter}{FIRST_DATA_ROW}:{prev_letter}{last_row}",
+                       value_render_option="UNFORMATTED_VALUE")
+
+    colours: Dict[int, Dict[str, float]] = {}
+    up = down = 0
+    for r, now in ratings.items():
+        i = r - FIRST_DATA_ROW
+        prev = clean_rating(prev_rows[i][0]) if i < len(prev_rows) and prev_rows[i] else None
+        if prev is None:
+            continue
+        if now > prev:
+            colours[r] = LIGHT_GREEN_3
+            up += 1
+        elif now < prev:
+            colours[r] = LIGHT_RED_3
+            down += 1
+
+    try:
+        base = column_backgrounds(sh, ws, FIRST_DATE_COL, FIRST_DATA_ROW, last_row)
+        for r, colour in base.items():
+            colours.setdefault(r, colour)
+    except Exception as e:
+        logger.warning(f"Note on reading the sheet's row colours (unchanged cells left as they are): {e}")
+
+    def fill(first_row: int, end_row: int, colour: Dict[str, float]) -> Dict[str, Any]:
+        return {"repeatCell": {
+            "range": {"sheetId": ws.id, "startRowIndex": first_row - 1, "endRowIndex": end_row,
+                      "startColumnIndex": col - 1, "endColumnIndex": col},
+            "cell": {"userEnteredFormat": {"backgroundColor": colour}},
+            "fields": "userEnteredFormat.backgroundColor",
+        }}
+
+    # neighbouring rows with the same colour share one request
+    requests = []
+    run_start = prev_row = run_colour = None
+    for r in sorted(colours):
+        if run_colour is not None and r == prev_row + 1 and colours[r] == run_colour:
+            prev_row = r
+            continue
+        if run_colour is not None:
+            requests.append(fill(run_start, prev_row, run_colour))
+        run_start = prev_row = r
+        run_colour = colours[r]
+    if run_colour is not None:
+        requests.append(fill(run_start, prev_row, run_colour))
+    if requests:
+        sh.batch_update({"requests": requests})
+    logger.info(f"Rating change vs column {prev_letter}: {up} increased (light green), {down} dropped (light red)")
+
+
 def run(spreadsheet_id: str, sheet_name: str, target: date, test_limit: Optional[int] = None):
     import gspread
     from gsheet_engine import get_gspread_client
@@ -218,6 +305,10 @@ def run(spreadsheet_id: str, sheet_name: str, target: date, test_limit: Optional
     cells = [gspread.Cell(p["row"], col, ratings[p["row"]]) for p in products if p["row"] in ratings]
     if cells:
         ws.update_cells(cells, value_input_option="USER_ENTERED")
+    try:
+        highlight_rating_changes(sh, ws, col, ratings, last_row)
+    except Exception as e:
+        logger.warning(f"Note on rating-change highlighting: {e}")
     missing = [p for p in products if p["row"] not in ratings]
     logger.info("=" * 60)
     logger.info(f"  RATING TRACKER COMPLETE - column {letter} ({target.isoformat()})")
