@@ -61,6 +61,23 @@ def col_to_letter(col_idx: int) -> str:
     return result
 
 
+# Google Sheets palette colours used to flag day-on-day price moves
+LIGHT_RED_3 = {"red": 0.957, "green": 0.8, "blue": 0.8}        # #f4cccc  price went UP
+LIGHT_GREEN_3 = {"red": 0.851, "green": 0.918, "blue": 0.827}  # #d9ead3  price went DOWN
+NO_FILL = {"red": 1.0, "green": 1.0, "blue": 1.0}
+
+
+def to_number(val: Any) -> Optional[float]:
+    """'26,000' / '₹26000' / 26000 -> 26000.0 ; 'OOS' / '' -> None"""
+    if isinstance(val, (int, float)):
+        return float(val)
+    text = str(val or "").replace("₹", "").replace(",", "").replace("Rs.", "").strip()
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def get_gspread_client() -> Optional[gspread.Client]:
     """Authenticates gspread client using Service Account JSON (Env var or local file)"""
     env_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON")
@@ -236,6 +253,7 @@ class GoogleSheetPriceTrackerBrain:
         col_coupon_letter = col_to_letter(col_coupon)
 
         cells_to_update = []
+        today_prices = {}       # row -> price fetched today (numbers only, no OOS)
         processed_count = 0
         success_count = 0
         fail_count = 0
@@ -302,6 +320,7 @@ class GoogleSheetPriceTrackerBrain:
                 logger.error(f"  Scrape error on row {r}: {e}")
 
             if scraped and isinstance(scraped.price, int):
+                today_prices[r] = scraped.price
                 cells_to_update.extend([
                     gspread.Cell(r, col_price, scraped.price),
                     gspread.Cell(r, col_bank, scraped.bank_offer if scraped.bank_offer else ""),
@@ -371,6 +390,12 @@ class GoogleSheetPriceTrackerBrain:
             except Exception as e:
                 logger.error(f"  Final save error: {e}")
 
+        # Highlight today's Price cells against the previous day's Price column
+        try:
+            self.highlight_price_changes(sh, ws, start_col, row2, all_rows, today_prices, last_data_row)
+        except Exception as e:
+            logger.warning(f"Note on price-change highlighting: {e}")
+
         elapsed = time.time() - t0
         logger.info("=" * 60)
         logger.info(f"  GOOGLE SHEET [{ws.title}] CRAWL COMPLETE")
@@ -378,6 +403,63 @@ class GoogleSheetPriceTrackerBrain:
         logger.info(f"  Successful: {success_count} | OOS/Failed: {fail_count}")
         logger.info(f"  Elapsed: {elapsed:.1f}s ({elapsed/60:.1f} mins)")
         logger.info("=" * 60)
+
+    def highlight_price_changes(self, sh, ws, start_col: int, row2: List[str], all_rows: List[List[str]],
+                                today_prices: Dict[int, int], last_data_row: int):
+        """
+        Compares today's Price with the Price of the previous date block (6 columns to the left):
+          price increased -> Light Red 3 fill, price decreased -> Light Green 3 fill.
+        Unchanged prices, OOS (either day) and rows without a previous price get no fill.
+        """
+        prev_col = start_col - BLOCK_SIZE
+        prev_header = row2[prev_col - 1].strip().lower() if 0 < prev_col <= len(row2) else ""
+        if prev_col < 1 or prev_header != SUB_HEADERS[0].strip().lower():
+            logger.info(f"[{ws.title}] No previous-day Price column found - skipping price-change highlighting.")
+            return
+
+        colours = {}            # row -> fill colour
+        up = down = 0
+        for r, price_now in today_prices.items():
+            row_vals = all_rows[r - 1] if (r - 1) < len(all_rows) else []
+            price_prev = to_number(row_vals[prev_col - 1]) if len(row_vals) >= prev_col else None
+            if price_prev is None:
+                continue
+            if price_now > price_prev:
+                colours[r] = LIGHT_RED_3
+                up += 1
+            elif price_now < price_prev:
+                colours[r] = LIGHT_GREEN_3
+                down += 1
+
+        def cell_range(first_row: int, last_row: int) -> Dict[str, int]:
+            return {"sheetId": ws.id, "startRowIndex": first_row - 1, "endRowIndex": last_row,
+                    "startColumnIndex": start_col - 1, "endColumnIndex": start_col}
+
+        def fill(first_row: int, last_row: int, colour: Dict[str, float]) -> Dict[str, Any]:
+            return {"repeatCell": {
+                "range": cell_range(first_row, last_row),
+                "cell": {"userEnteredFormat": {"backgroundColor": colour}},
+                "fields": "userEnteredFormat.backgroundColor",
+            }}
+
+        # clear the whole Price column of today's block first (so a re-run starts clean),
+        # then colour the changed rows; neighbouring rows with the same colour share one request
+        requests = [fill(FIRST_DATA_ROW, last_data_row, NO_FILL)]
+        run_start = prev_row = run_colour = None
+        for r in sorted(colours):
+            if run_colour is not None and r == prev_row + 1 and colours[r] is run_colour:
+                prev_row = r
+                continue
+            if run_colour is not None:
+                requests.append(fill(run_start, prev_row, run_colour))
+            run_start = prev_row = r
+            run_colour = colours[r]
+        if run_colour is not None:
+            requests.append(fill(run_start, prev_row, run_colour))
+
+        sh.batch_update({"requests": requests})
+        logger.info(f"[{ws.title}] Price change vs {col_to_letter(prev_col)} column: "
+                    f"{up} increased (light red), {down} decreased (light green)")
 
     def run(self, target_sheets: Optional[List[str]] = None, test_limit: Optional[int] = None):
         """Processes all requested worksheets in Google Sheets"""

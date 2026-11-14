@@ -178,6 +178,7 @@ class PriceTrackerBrain:
 
         logger.info(f"[{ws.title}] Total rows to monitor: {len(rows_to_process)} (Rows {FIRST_DATA_ROW} to {last_row})")
 
+        today_prices = {}       # row -> price fetched today (numbers only, no OOS)
         processed_count = 0
         success_count = 0
         fail_count = 0
@@ -248,6 +249,7 @@ class PriceTrackerBrain:
                 logger.error(f"  Scrape exception on row {r}: {e}")
 
             if scraped_data and isinstance(scraped_data.price, int):
+                today_prices[r] = scraped_data.price
                 ws.cell(r, col_price, scraped_data.price)
                 ws.cell(r, col_bank, scraped_data.bank_offer)
                 ws.cell(r, col_coupon, scraped_data.coupon or 0)
@@ -296,8 +298,45 @@ class PriceTrackerBrain:
             if processed_count % 5 == 0:
                 self.save_workbook()
 
+        self.highlight_price_changes(ws, col_price, today_prices, last_row)
+
         elapsed = time.time() - t0
         logger.info(f"[{ws.title}] CRAWL COMPLETE: Processed {processed_count} (Success: {success_count}, Failed/OOS: {fail_count}) in {elapsed:.1f}s")
+
+    def highlight_price_changes(self, ws, col_price: int, today_prices: Dict[int, int], last_row: int):
+        """
+        Compares today's Price with the Price of the previous date block (6 columns to the left):
+          price increased -> Light Red 3 fill, price decreased -> Light Green 3 fill.
+        Unchanged prices, OOS (either day) and rows without a previous price get no fill.
+        """
+        prev_col = col_price - BLOCK_SIZE
+        prev_header = str(ws.cell(2, prev_col).value or "").strip().lower() if prev_col >= 1 else ""
+        if prev_header != SUB_HEADERS[0].strip().lower():
+            logger.info(f"[{ws.title}] No previous-day Price column found - skipping price-change highlighting.")
+            return
+
+        light_red_3 = PatternFill(start_color="F4CCCC", end_color="F4CCCC", fill_type="solid")
+        light_green_3 = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")
+        up = down = 0
+        for r in range(FIRST_DATA_ROW, last_row + 1):
+            ws.cell(r, col_price).fill = PatternFill(fill_type=None)   # re-run starts clean
+        for r, price_now in today_prices.items():
+            prev_val = ws.cell(r, prev_col).value
+            if isinstance(prev_val, str):
+                try:
+                    prev_val = float(prev_val.replace("₹", "").replace(",", "").strip())
+                except ValueError:
+                    prev_val = None
+            if not isinstance(prev_val, (int, float)):
+                continue
+            if price_now > prev_val:
+                ws.cell(r, col_price).fill = light_red_3
+                up += 1
+            elif price_now < prev_val:
+                ws.cell(r, col_price).fill = light_green_3
+                down += 1
+        logger.info(f"[{ws.title}] Price change vs {get_column_letter(prev_col)} column: "
+                    f"{up} increased (light red), {down} decreased (light green)")
 
     def execute(self, sheet_names: Optional[List[str]] = None, test_limit: Optional[int] = None, skip_existing: bool = False):
         """
