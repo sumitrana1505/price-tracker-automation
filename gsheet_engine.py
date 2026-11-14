@@ -442,12 +442,21 @@ class GoogleSheetPriceTrackerBrain:
                 "fields": "userEnteredFormat.backgroundColor",
             }}
 
-        # clear the whole Price column of today's block first (so a re-run starts clean),
-        # then colour the changed rows; neighbouring rows with the same colour share one request
-        requests = [fill(FIRST_DATA_ROW, last_data_row, NO_FILL)]
+        # The sheet's own formatting (e.g. grey row shading) must stay untouched: cells whose
+        # price did not go up or down keep / get back the background of the cell next to them
+        # in the same row. Only if that cannot be read are they simply left alone.
+        try:
+            base = self._row_backgrounds(sh, ws, start_col + 1, FIRST_DATA_ROW, last_data_row)
+            for r, colour in base.items():
+                colours.setdefault(r, colour)
+        except Exception as e:
+            logger.warning(f"Note on reading row shading (unchanged cells left as they are): {e}")
+
+        # neighbouring rows with the same colour share one request
+        requests = []
         run_start = prev_row = run_colour = None
         for r in sorted(colours):
-            if run_colour is not None and r == prev_row + 1 and colours[r] is run_colour:
+            if run_colour is not None and r == prev_row + 1 and colours[r] == run_colour:
                 prev_row = r
                 continue
             if run_colour is not None:
@@ -457,9 +466,29 @@ class GoogleSheetPriceTrackerBrain:
         if run_colour is not None:
             requests.append(fill(run_start, prev_row, run_colour))
 
-        sh.batch_update({"requests": requests})
+        if requests:
+            sh.batch_update({"requests": requests})
         logger.info(f"[{ws.title}] Price change vs {col_to_letter(prev_col)} column: "
                     f"{up} increased (light red), {down} decreased (light green)")
+
+    def _row_backgrounds(self, sh, ws, col: int, first_row: int, last_row: int) -> Dict[int, Dict[str, float]]:
+        """Returns {row: background colour} as currently displayed in one column of the sheet."""
+        letter = col_to_letter(col)
+        title = ws.title.replace("'", "''")
+        meta = sh.fetch_sheet_metadata(params={
+            "ranges": [f"'{title}'!{letter}{first_row}:{letter}{last_row}"],
+            "fields": "sheets(data(rowData(values(effectiveFormat(backgroundColor)))))",
+        })
+        row_data = meta["sheets"][0]["data"][0].get("rowData", [])
+        out = {}
+        for r in range(first_row, last_row + 1):
+            i = r - first_row
+            values = row_data[i].get("values", []) if i < len(row_data) else []
+            bg = (values[0].get("effectiveFormat", {}).get("backgroundColor") if values else None) or {}
+            # the API leaves out channels that are 0; an empty cell means plain white
+            out[r] = ({"red": bg.get("red", 0.0), "green": bg.get("green", 0.0), "blue": bg.get("blue", 0.0)}
+                      if bg else dict(NO_FILL))
+        return out
 
     def run(self, target_sheets: Optional[List[str]] = None, test_limit: Optional[int] = None):
         """Processes all requested worksheets in Google Sheets"""

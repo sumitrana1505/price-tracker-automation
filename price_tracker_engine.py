@@ -318,8 +318,10 @@ class PriceTrackerBrain:
         light_red_3 = PatternFill(start_color="F4CCCC", end_color="F4CCCC", fill_type="solid")
         light_green_3 = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")
         up = down = 0
+        # keep the sheet's own formatting (e.g. grey row shading): a Price cell that is not
+        # red/green takes the fill of the cell next to it in the same row
         for r in range(FIRST_DATA_ROW, last_row + 1):
-            ws.cell(r, col_price).fill = PatternFill(fill_type=None)   # re-run starts clean
+            ws.cell(r, col_price).fill = copy.copy(ws.cell(r, col_price + 1).fill)
         for r, price_now in today_prices.items():
             prev_val = ws.cell(r, prev_col).value
             if isinstance(prev_val, str):
