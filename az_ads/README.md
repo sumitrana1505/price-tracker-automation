@@ -40,4 +40,5 @@ Needs three git-ignored files in `az_ads/`: `amazon_state.json`, `service_accoun
 
 - New model / ASIN: edit `config.json`.
 - This repository is public: the workflow log shows no ads numbers and no export file is uploaded.
-- "MTD Actual" formulas in the sheet are not extended for new date columns.
+- "<Month>'s MTD Actual" (Units Sold, Clicks) of the two Amazon sections is rebuilt on every run as
+  the sum of all day columns of that month. A new month needs its "MTD Actual" header to exist first.

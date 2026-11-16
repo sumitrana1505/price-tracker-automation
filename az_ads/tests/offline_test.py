@@ -97,7 +97,12 @@ def main(folder):
     assert not bad, f"differs from the manual 12-Nov values: {bad}"
     assert ws.cell("XA44") == "=SUM(XA33:XA43)" and ws.cell("XC55") == "=XA55/XB55"
     changed = {rowcol_to_a1(*k) for k in ws.g if ws.g[k] != before.get(k)}
-    assert all(c.startswith(("XA", "XB", "XC")) for c in changed), changed
+    assert all(c.startswith(("XA", "XB", "XC", "AO", "AP")) for c in changed), changed
+    # Nov MTD Actual: 1..13-Nov (VT..XD); clicks use the Clicks column of every day (VX, not VW)
+    assert ws.cell("AO33") == "=SUM(VT33,VW33,VZ33,WC33,WF33,WI33,WL33,WO33,WR33,WU33,WX33,XA33,XD33)", ws.cell("AO33")
+    assert ws.cell("AP33") == "=SUM(VU33,VX33,WA33,WD33,WG33,WJ33,WM33,WP33,WS33,WV33,WY33,XB33,XE33)", ws.cell("AP33")
+    assert ws.cell("AP55") == "=SUM(AP48:AP54)" and ws.cell("AO44") == "=SUM(AO33:AO43)"
+    assert ws.cell("AO3") == before[(3, 41)]                        # Flipkart MTD untouched
     print("PASS 1: existing 12-Nov column reproduced exactly; nothing else touched")
 
     # 2) date column missing (15-Nov-26) -> 3 new columns XG:XI in all four sections
@@ -110,6 +115,7 @@ def main(folder):
     assert ws.cell("XG36") == 7 and ws.cell("XH36") == 955 and ws.cell("XI36") == "=XG36/XH36"
     assert ws.cell("XG3") is None and ws.cell("XH18") is None      # Flipkart rows left empty
     assert ws.cell("XD31") == "13-Nov-26"                           # previous day untouched
+    assert ws.cell("AO36").endswith(",XA36,XD36,XG36)") and ws.cell("AP36").endswith(",XB36,XE36,XH36)")
     print("PASS 2: missing date -> new XG:XI block with headers, formulas and Amazon numbers")
 
 

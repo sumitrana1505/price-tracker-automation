@@ -201,6 +201,34 @@ def _is_number(s):
         return False
 
 
+def mtd_updates(header, target: date, bodies, log=print):
+    """
+    "<Month>'s MTD Actual" (Units Sold, Clicks) = sum of every day of that month that has a column.
+    Rebuilt from the date headers on each run, so a newly added day is always included:
+        Units  =SUM(VT33,VW33,...)      Clicks  =SUM(VU33,VX33,...)
+    """
+    abbr = f"{target:%b}".lower()
+    mtd = [i for i, v in enumerate(header, start=1)
+           if "mtd actual" in norm(v) and norm(v).startswith(abbr)]
+    if not mtd:
+        log(f"WARNING: no \"{target:%B}'s MTD Actual\" column found - MTD formulas not updated")
+        return []
+    mtd_col = mtd[-1]
+    days = [i for i, v in enumerate(header, start=1) if i > 1 and (d := parse_date(v))
+            and (d.year, d.month) == (target.year, target.month)]
+    out = []
+    for first, total in bodies:
+        for r in range(first, total):
+            out.append({"range": f"{rowcol_to_a1(r, mtd_col)}:{rowcol_to_a1(r, mtd_col + 1)}", "values": [[
+                "=SUM(" + ",".join(rowcol_to_a1(r, c) for c in days) + ")",
+                "=SUM(" + ",".join(rowcol_to_a1(r, c + 1) for c in days) + ")"]]})
+        out.append({"range": f"{rowcol_to_a1(total, mtd_col)}:{rowcol_to_a1(total, mtd_col + 1)}", "values": [[
+            f"=SUM({rowcol_to_a1(first, mtd_col + k)}:{rowcol_to_a1(total - 1, mtd_col + k)})" for k in (0, 1)]]})
+    log(f"MTD Actual ({rowcol_to_a1(1, mtd_col)[:-1]}:{rowcol_to_a1(1, mtd_col + 1)[:-1]}) = "
+        f"sum of {len(days)} day(s) of {target:%b-%y}")
+    return out
+
+
 # ----------------------------------------------------------------- main entry
 def update_sheet(ws, cfg, data, target: date, dry_run=False, log=print):
     col_a = ws.col_values(1)
@@ -257,6 +285,13 @@ def update_sheet(ws, cfg, data, target: date, dry_run=False, log=print):
                         "values": [[f"={rowcol_to_a1(r, col)}/{rowcol_to_a1(r, col + 1)}"]]})
         for m in set(models) - seen:
             log(f"WARNING: model '{m}' from config.json has no row under '{sec['title']}'")
+
+    # ---- month-to-date formulas of the two Amazon sections
+    if header[col - 1:col] == [] or parse_date(header[col - 1]) != target:
+        header = header + [""] * (col - len(header))       # the day was just added (or dry-run)
+        header[col - 1] = date_label(target)
+    amazon_bodies = [b for b in (_body(col_a, t) for t, _ in sections) if b]
+    updates += mtd_updates(header, target, amazon_bodies, log)
 
     for title, model, units, clicks in ([] if QUIET else summary):
         log(f"  {title[:15]:15}  {model:14} units={units:<4} clicks={clicks}")
