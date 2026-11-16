@@ -1,0 +1,35 @@
+{
+  "sheet_gid": 389892889,
+  "sheet_tab": "Ads_Data",
+  "timezone": "Asia/Kolkata",
+  "sections": [
+    {
+      "title": "Amazon Philips Ads Sales Report",
+      "models": {
+        "32PFT6130/94": "B0FBWG1Z6Q",
+        "43PFT6130/94": "B0FBW5S6H2",
+        "43PQT8100/94": "B0FDQY49H8",
+        "50PQT8100/94": "B0FDQTLSFT",
+        "55PQT8100/94": "B0FDQVJQKB",
+        "65PQT8100/94": "B0FDQRTXBC",
+        "75PQT8100/94": "B0FNR5JJSS",
+        "55MLED610/94": "B0G6LTHMLF",
+        "65MLED610/94": "B0G6LYM6DY",
+        "75MLED610/94": "B0GJ48B861",
+        "85PQT8101/94": "B0HB4K76GV"
+      }
+    },
+    {
+      "title": "Amazon Coocaa Ads Sales Report",
+      "models": {
+        "43Y74 Pro": "B0FVFX1PFQ",
+        "55Y74 Pro": "B0FVFX1135",
+        "65Y74 Pro": "B0FVFSRDPV",
+        "55MINI75Q": "B0G2CHX7GM",
+        "65MINI75Q": "B0G2CG8XQX",
+        "75MINI75Q": "B0GL31SJM2",
+        "55Y74 Plus": "B0GZK88VKS"
+      }
+    }
+  ]
+}

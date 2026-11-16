@@ -16,6 +16,11 @@ credentials.json
 client_secret*.json
 token.json
 .env
+amazon_state.json
+amazon_state.b64.txt
+sheet_id.txt
+.browser-profile/
+az_ads/out/
 
 # Logs and runtime artifacts
 *.log
