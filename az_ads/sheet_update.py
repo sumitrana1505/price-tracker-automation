@@ -120,6 +120,12 @@ def format_counts(ws, col, bodies):
                   "startColumnIndex": col - 1, "endColumnIndex": col + 1},
         "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0"}}},
         "fields": "userEnteredFormat.numberFormat"}} for first, total in bodies]
+    # whole block (date header, Units Sold / Clicks / CR, numbers, Total) centre aligned
+    reqs += [{"repeatCell": {
+        "range": {"sheetId": ws.id, "startRowIndex": first - 3, "endRowIndex": total,
+                  "startColumnIndex": col - 1, "endColumnIndex": col + 2},
+        "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
+        "fields": "userEnteredFormat.horizontalAlignment"}} for first, total in bodies]
     if reqs:
         ws.spreadsheet.batch_update({"requests": reqs})
 
