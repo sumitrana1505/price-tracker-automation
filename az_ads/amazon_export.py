@@ -32,11 +32,20 @@ class LoginExpired(RuntimeError):
 def load_state():
     raw = os.environ.get("AMAZON_ADS_STORAGE_STATE", "").strip()
     if raw:
-        if not raw.startswith("{"):
-            raw = base64.b64decode(raw).decode("utf-8")
-        return json.loads(raw)
+        try:
+            if not raw.startswith("{"):
+                raw = base64.b64decode("".join(raw.split())).decode("utf-8")
+            state = json.loads(raw)
+            assert state.get("cookies")
+            return state
+        except Exception:
+            raise LoginExpired("The AMAZON_ADS_STORAGE_STATE secret is not valid - paste the WHOLE "
+                               "content of amazon_state.b64.txt into it, nothing else.")
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    if os.environ.get("GITHUB_ACTIONS"):
+        raise LoginExpired("The AMAZON_ADS_STORAGE_STATE secret is missing or empty in this repository "
+                           "(Settings > Secrets and variables > Actions > Repository secrets).")
     raise LoginExpired("No saved Amazon login. Run:  python save_login.py")
 
 

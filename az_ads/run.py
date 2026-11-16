@@ -66,6 +66,12 @@ if __name__ == "__main__":
     else:                       # public CI log: short, scrubbed error instead of a full traceback
         try:
             main()
+        except SystemExit as e:
+            if e.code not in (0, None):
+                print(f"::error title=AZ_Ads_data::{e.code}")     # shown on the run's summary page
+            raise
         except Exception as e:
             msg = re.sub(r"entityId=[^\s&'\"]+", "entityId=***", str(e)).splitlines()
-            sys.exit(f"FAILED: {type(e).__name__}: {msg[0][:300] if msg else ''}")
+            text = f"FAILED: {type(e).__name__}: {msg[0][:300] if msg else ''}"
+            print(f"::error title=AZ_Ads_data::{text}")
+            sys.exit(text)
