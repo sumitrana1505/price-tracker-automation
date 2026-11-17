@@ -79,7 +79,8 @@ def _set_date(page, date_btn, day: date, log):
     """Pick a single day in the date-range picker and confirm the button shows it."""
     want = f"{day:%b} {day.day}, {day.year}"                     # Nov 12, 2026
     shown = lambda: re.sub(r"\s+", " ", date_btn.inner_text())
-    single = lambda: want in shown() and not re.search(r"\d{4}\s*[-–]", shown()) and shown().count(",") == 1
+    # exactly "Date range: Nov 12, 2026" - a range such as "Nov 1 - Nov 12, 2026" must NOT pass
+    single = lambda: re.sub(r"^[^:]*:\s*", "", shown()).strip() == want
     if single():
         log(f"Date range already: {shown()}")
         return
