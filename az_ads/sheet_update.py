@@ -79,7 +79,8 @@ def parse_export(path):
 
 
 def lookup(data, asin):
-    return data.get(f"{asin}-{asin}", {"orders": 0, "clicks": 0})
+    # Amazon export key is "<ASIN>-<ASIN>"; the Flipkart job (fk_ads) keys by the plain FSN
+    return data.get(f"{asin}-{asin}") or data.get(asin) or {"orders": 0, "clicks": 0}
 
 
 # ----------------------------------------------------------------- sheet helpers

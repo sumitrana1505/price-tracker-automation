@@ -21,6 +21,9 @@ amazon_state.b64.txt
 sheet_id.txt
 .browser-profile/
 az_ads/out/
+flipkart_state.json
+flipkart_state.b64.txt
+fk_ads/out/
 
 # Logs and runtime artifacts
 *.log

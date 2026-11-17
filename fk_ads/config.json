@@ -1,0 +1,45 @@
+{
+  "sheet_gid": 389892889,
+  "sheet_tab": "Ads_Data",
+  "timezone": "Asia/Kolkata",
+  "accounts": ["Philips_2025_PO", "Coocaa_RO_2025"],
+  "report": {
+    "Ad Product": "PLA",
+    "Select Report For": "Flipkart",
+    "Report Type": "Consolidated FSN Report"
+  },
+  "sections": [
+    {
+      "title": "Flipkart Coocaa Ads Sales Report",
+      "models": {
+        "32S4U Plus": "TVSHBFTTHBQQUMRB",
+        "32S4U Pro": "TVSHE8RKMZXK2DGH",
+        "43S4U Plus": "TVSHBFTTQCZXC4YG",
+        "50S4U Plus": "TVSHEW4MXMUMGJZ9",
+        "43Y74 Pro": "TVSHCTNKXSDYAFGJ",
+        "55Y74 Pro": "TVSHCTNKZFKJJUBG",
+        "55Y74 Plus": "TVSHEW4MCAZEE3A8",
+        "65Y74 Pro": "TVSHCTNK7F4TBGK9",
+        "55MINI75Q": "TVSHHJN37ZTZFGX2",
+        "65MINI75Q": "TVSHHJN3Y7HWHPXF",
+        "75MINI75Q": "TVSHKSCTWH3KZSBY"
+      }
+    },
+    {
+      "title": "Flipkart Philips Ads Sales Report",
+      "models": {
+        "32PFT6130/94": "TVSHBVARKXA88JQJ",
+        "43PFT6130/94": "TVSH7CYK2ZDHB6PY",
+        "43PQT8100/94": "TVSHEBY6HXP2SPHY",
+        "50PQT8100/94": "TVSHGGYHGHPNNYTT",
+        "55PQT8100/94": "TVSHEBY6WXENSJME",
+        "65PQT8100/94": "TVSHEBY6CZF5GNCT",
+        "75PQT8100/94": "TVSHGGYHA84HEK8F",
+        "55MLED610/94": "TVSHGWQZZGQGRJ3H",
+        "65MLED610/94": "TVSHGWQZKXZKMKKG",
+        "75MLED610/94": "TVSHKCSKAHGYVATH",
+        "85PQT8101/94": "TVSHPH7YXCHHNFWE"
+      }
+    }
+  ]
+}
