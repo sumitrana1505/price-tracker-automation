@@ -89,6 +89,28 @@ def _visible(page, text):
     return None
 
 
+TOUR_BUTTONS = ("Done!", "Got it", "Got it!", "Okay", "OK", "Skip", "Skip tour", "Close", "Next")
+
+
+def _dismiss_tours(page, log=print):
+    """Close Flipkart's 'what's new' tour bubbles. A fresh browser (every GitHub run) gets them,
+    and their grey overlay swallows every click."""
+    for _ in range(6):
+        page.wait_for_timeout(400)
+        overlay = page.locator("[class*='MouseEventsBlockingOverlay']")
+        btn = next((b for t in TOUR_BUTTONS if (b := _visible(page, t))), None)
+        if btn is None:
+            if overlay.count() and overlay.first.is_visible():
+                page.keyboard.press("Escape")
+                continue
+            return
+        try:
+            btn.click(timeout=5_000)
+        except PWTimeout:
+            btn.click(timeout=5_000, force=True)
+        log("Closed a Flipkart tour pop-up")
+
+
 def _switch_account(page, name, all_names, log):
     """Top-right account button -> 'Switch to account' -> click the account name."""
     page.wait_for_function(
@@ -183,14 +205,25 @@ def download_reports(day: date, cfg, headless=True, log=print):
                                   locale="en-IN", timezone_id="Asia/Kolkata",
                                   viewport={"width": 1680, "height": 950})
         page = ctx.new_page()
+        step = "sign in"
         try:
             _ensure_signed_in(page, log)
             for n, account in enumerate(cfg["accounts"], start=1):
+                step = f"switch to account {n}"
+                _dismiss_tours(page, log)
                 _switch_account(page, account, cfg["accounts"], log)
+                step = f"open Other Reports (account {n})"
+                _dismiss_tours(page, log)
                 _open_other_reports(page)
                 for label, option in cfg["report"].items():
+                    step = f"set '{label}' (account {n})"
+                    _dismiss_tours(page, log)
                     _choose(page, label, option, log)
+                step = f"set Date (account {n})"
+                _dismiss_tours(page, log)
                 _set_date(page, day, today)
+                step = f"Download (account {n})"
+                _dismiss_tours(page, log)
                 with page.expect_download(timeout=180_000) as dl:
                     page.get_by_role("button", name=re.compile(r"Download")).first.click()
                 suffix = Path(dl.value.suggested_filename).suffix or ".csv"
@@ -199,14 +232,17 @@ def download_reports(day: date, cfg, headless=True, log=print):
                 log(f"Report saved: {dest.name}")
                 files.append(dest)
             return files
-        except Exception:
+        except LoginExpired:
+            raise
+        except Exception as e:
             try:                                   # evidence for the failed run (never uploaded)
                 page.screenshot(path=str(OUT / "failure.png"), full_page=False)
                 if not os.environ.get("GITHUB_ACTIONS"):
                     (OUT / "failure.html").write_text(page.content(), encoding="utf-8")
             except Exception:
                 pass
-            raise
+            first = (str(e).splitlines() or [""])[0]
+            raise RuntimeError(f"Flipkart step '{step}' failed: {type(e).__name__}: {first}") from e
         finally:
             ctx.close()
             browser.close()
