@@ -18,7 +18,7 @@ on:
 jobs:
   track-ratings:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
 

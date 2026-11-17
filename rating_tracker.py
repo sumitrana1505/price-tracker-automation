@@ -48,6 +48,9 @@ FIRST_DATA_ROW = 2
 COL_LINK = 4            # D: product link
 FIRST_DATE_COL = 5      # E: first date column
 SHEETS_EPOCH = date(1899, 12, 30)     # Google Sheets day 0
+FLIPKART_ROUNDS = 3             # first try + 2 retry rounds for the products that failed
+FLIPKART_RETRY_PAUSE = 40       # seconds between rounds
+FAILURES: Dict[int, str] = {}   # row -> why its rating could not be fetched (last attempt)
 DATE_FORMATS = ("%Y/%m/%d", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d-%b-%Y", "%d %b %Y", "%m/%d/%Y")
 
 
@@ -136,23 +139,68 @@ def fetch_ratings(products: List[Dict[str, Any]]) -> Dict[int, float]:
                 ratings[row] = r
 
     # ---- Flipkart: one by one (the scraper adds its own polite delay)
+    # Products that fail are tried again in up to two more rounds, each after a pause and
+    # with a fresh scraper: a refusal by Flipkart is often temporary.
     flipkart = [p for p in products if channel_of(p["link"]) == "flipkart"]
-    if flipkart:
-        logger.info(f"[Flipkart] Fetching ratings for {len(flipkart)} products...")
+    FAILURES.clear()
+    todo = flipkart
+    for round_no in range(1, FLIPKART_ROUNDS + 1):
+        if not todo:
+            break
+        if round_no == 1:
+            logger.info(f"[Flipkart] Fetching ratings for {len(todo)} products...")
+        else:
+            logger.info(f"[Flipkart] Round {round_no}: retrying {len(todo)} products "
+                        f"after {FLIPKART_RETRY_PAUSE}s...")
+            time.sleep(FLIPKART_RETRY_PAUSE)
         fk = FlipkartScraper()
-        for i, p in enumerate(flipkart, start=1):
-            r = None
+        failed = []
+        for i, p in enumerate(todo, start=1):
+            r, why = None, "no rating on the page"
             try:
                 data = fk.scrape(p["link"], model=p["model"])
                 r = clean_rating(data.rating)
                 if r is None and data.error_msg:
-                    logger.warning(f"  [Flipkart {i}/{len(flipkart)}] Row {p['row']} | {p['model']}: {data.error_msg}")
+                    why = data.error_msg
+                    logger.warning(f"  [Flipkart {i}/{len(todo)}] Row {p['row']} | {p['model']}: {data.error_msg}")
             except Exception as e:
-                logger.warning(f"  [Flipkart {i}/{len(flipkart)}] Row {p['row']} | {p['model']}: {e}")
+                why = type(e).__name__
+                logger.warning(f"  [Flipkart {i}/{len(todo)}] Row {p['row']} | {p['model']}: {e}")
             if r is not None:
                 ratings[p["row"]] = r
-            logger.info(f"  [Flipkart {i}/{len(flipkart)}] Row {p['row']} | {p['model']} | rating={r}")
+                FAILURES.pop(p["row"], None)
+            else:
+                failed.append(p)
+                FAILURES[p["row"]] = why
+            logger.info(f"  [Flipkart {i}/{len(todo)}] Row {p['row']} | {p['model']} | rating={r}")
+        todo = failed
     return ratings
+
+
+def report_missing(products: List[Dict[str, Any]], ratings: Dict[int, float]) -> bool:
+    """
+    Says plainly when ratings are missing (as a warning/error box on the GitHub run page too).
+    Returns True when a whole channel came back empty - the run should then count as failed.
+    """
+    gh = bool(os.getenv("GITHUB_ACTIONS"))
+    whole_channel_empty = False
+    for channel in ("flipkart", "amazon"):
+        rows = [p["row"] for p in products if channel_of(p["link"]) == channel]
+        missing = [r for r in rows if r not in ratings]
+        if not rows or not missing:
+            continue
+        reasons: Dict[str, int] = {}
+        for r in missing:
+            why = FAILURES.get(r, "not fetched")
+            reasons[why] = reasons.get(why, 0) + 1
+        why_text = ", ".join(f"{k} x{v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1]))
+        text = f"{channel.capitalize()}: {len(missing)} of {len(rows)} ratings not fetched ({why_text})"
+        empty = len(missing) == len(rows)
+        whole_channel_empty = whole_channel_empty or empty
+        logger.error(text) if empty else logger.warning(text)
+        if gh:
+            print(f"::{'error' if empty else 'warning'} title=Rating tracker::{text}", flush=True)
+    return whole_channel_empty
 
 
 def column_backgrounds(sh, ws, col: int, first_row: int, last_row: int) -> Dict[int, Dict[str, float]]:
@@ -316,6 +364,9 @@ def run(spreadsheet_id: str, sheet_name: str, target: date, test_limit: Optional
     for p in missing:
         logger.info(f"    no rating: row {p['row']} | {p['model']} | {p['link'][:70]}")
     logger.info("=" * 60)
+    if report_missing(products, ratings):
+        sys.exit("Rating tracker: a whole channel returned no ratings - see the message above. "
+                 "The ratings that were fetched have been written.")
 
 
 def main():

@@ -122,6 +122,8 @@ class FlipkartScraper:
         'Accept-Language': 'en-IN,en;q=0.9',
     }
 
+    RETRY_PROFILES = ("chrome131", "chrome131_android", "safari17_0")
+
     def __init__(self, pincode: str = DEFAULT_PINCODE):
         self.pincode = pincode
         if curl_requests:
@@ -137,28 +139,40 @@ class FlipkartScraper:
         time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
 
         resp = None
+        last_exc = ""
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 if curl_requests:
-                    resp = self.session.get(url, headers=self.HEADERS, timeout=REQUEST_TIMEOUT, impersonate="chrome120")
+                    if attempt == 1:
+                        resp = self.session.get(url, headers=self.HEADERS, timeout=REQUEST_TIMEOUT, impersonate="chrome120")
+                    else:
+                        # A refused request is retried as a different browser on a brand-new
+                        # session (no cookies of the refused one); the browser profile supplies
+                        # its own matching User-Agent.
+                        profile = self.RETRY_PROFILES[(attempt - 2) % len(self.RETRY_PROFILES)]
+                        self.session = curl_requests.Session(impersonate=profile)
+                        resp = self.session.get(url, headers={'Accept-Language': 'en-IN,en;q=0.9'},
+                                                timeout=REQUEST_TIMEOUT, impersonate=profile)
                 else:
                     resp = self.session.get(url, headers=self.HEADERS, timeout=REQUEST_TIMEOUT)
-                
+
                 if resp.status_code == 200:
                     break
                 elif resp.status_code == 404:
                     data.in_stock = False
                     data.error_msg = "Product 404 Not Found"
                     return data
-                elif resp.status_code in (429, 503):
-                    time.sleep(attempt * 2)
+                elif attempt < MAX_RETRIES:
+                    # 403 / 429 / 5xx: Flipkart is refusing or throttling us - wait before retrying
+                    time.sleep(attempt * 3 + random.uniform(0, 2))
             except Exception as e:
+                last_exc = type(e).__name__
                 logger.warning(f"[Flipkart] Attempt {attempt} failed for {url}: {e}")
                 time.sleep(attempt * 1.5)
 
         if not resp or resp.status_code != 200:
             data.in_stock = False
-            data.error_msg = f"HTTP {resp.status_code if resp else 'No response'}"
+            data.error_msg = f"HTTP {resp.status_code}" if resp is not None else f"No response ({last_exc or 'unknown'})"
             return data
 
         page_text = resp.text
