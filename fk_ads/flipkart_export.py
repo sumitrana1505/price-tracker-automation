@@ -111,6 +111,28 @@ def _dismiss_tours(page, log=print):
         log("Closed a Flipkart tour pop-up")
 
 
+def _click(page, loc, log=print, tries=5):
+    """Click; when a tour bubble pops up in the way (it can come late on a slow machine),
+    close it and click again."""
+    for i in range(tries):
+        try:
+            loc.click(timeout=8_000)
+            return
+        except PWTimeout:
+            if i == tries - 1:
+                raise
+            _dismiss_tours(page, log)
+
+
+def _wait_visible(page, text, seconds=15):
+    """Wait until an element with exactly this text is visible; return it (or None)."""
+    for _ in range(int(seconds * 2)):
+        if (el := _visible(page, text)) is not None:
+            return el
+        page.wait_for_timeout(500)
+    return None
+
+
 def _switch_account(page, name, all_names, log):
     """Top-right account button -> 'Switch to account' -> click the account name."""
     page.wait_for_function(
@@ -118,36 +140,49 @@ def _switch_account(page, name, all_names, log):
     if _visible(page, name):
         log(f"Account: {name}")
         return
-    current = next((el for n in all_names if (el := _visible(page, n))), None)
-    if current is None:
-        raise RuntimeError(f"None of the accounts {all_names} is shown at the top right - "
-                           "check 'accounts' in config.json")
-    current.click()
-    page.wait_for_timeout(1000)
-    target = _visible(page, name)
+    target = None
+    for attempt in range(3):                 # GitHub's machines are slow: wait for the menu, retry
+        _dismiss_tours(page, log)
+        current = next((el for n in all_names if (el := _visible(page, n))), None)
+        if current is None:
+            raise RuntimeError(f"None of the accounts {all_names} is shown at the top right - "
+                               "check 'accounts' in config.json")
+        _click(page, current, log)
+        if (target := _wait_visible(page, name, 15)) is not None:   # 'Switch to account' list
+            break
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(1000)
     if target is None:
-        raise RuntimeError(f"Account '{name}' is not in the 'Switch to account' list")
-    target.click()
+        raise RuntimeError(f"Account '{name}' is not in the 'Switch to account' list "
+                           "(opened the account menu 3 times)")
+    _click(page, target, log)
     page.wait_for_timeout(3000)
     try:
         page.wait_for_load_state("networkidle", timeout=30_000)
     except PWTimeout:
         pass
-    if not _visible(page, name):
+    others = [n for n in all_names if n != name]
+    for i in range(40):                      # up to 20 s: top right shows the new account only
+        if _visible(page, name) and not any(_visible(page, n) for n in others):
+            break
+        if i % 10 == 9:
+            page.keyboard.press("Escape")    # account menu left open
+        page.wait_for_timeout(500)
+    else:
         raise RuntimeError(f"Switching to account '{name}' did not work")
     log(f"Account: {name}")
 
 
-def _open_other_reports(page):
+def _open_other_reports(page, log=print):
     link = page.locator("a[href*='report' i]:visible").first      # left panel: Reports icon
     if link.count():
-        link.click()
+        _click(page, link, log)
     else:
         page.goto(HOME + "ad-account/reports" + (("?" + page.url.split("?", 1)[1]) if "?" in page.url else ""),
                   wait_until="domcontentloaded", timeout=90_000)
     tab = page.get_by_text("Other Reports", exact=True).first
     tab.wait_for(state="visible", timeout=60_000)
-    tab.click()
+    _click(page, tab, log)
     page.get_by_text("Report Type", exact=True).first.wait_for(state="visible", timeout=60_000)
 
 
@@ -164,31 +199,28 @@ def _choose(page, label, option, log):
     shown = re.sub(r"\s+", " ", box.inner_text()).replace(label, "", 1).strip()
     if shown == option:
         return
-    box.locator("xpath=./*[last()]").click()                      # the dropdown under the label
-    page.wait_for_timeout(700)
-    opt = _visible(page, option)
+    _click(page, box.locator("xpath=./*[last()]"), log)           # the dropdown under the label
+    opt = _wait_visible(page, option, 10)
     if opt is None:
         raise RuntimeError(f"'{label}' has no option '{option}'")
-    opt.click()
+    _click(page, opt, log)
     page.wait_for_timeout(700)
     log(f"{label}: {option}")
 
 
-def _set_date(page, day: date, today: date):
+def _set_date(page, day: date, today: date, log=print):
     preset = {today - timedelta(days=1): "Yesterday", today: "Today"}.get(day)
     if preset is None:
         raise RuntimeError(f"Only yesterday can be downloaded automatically for now. For {day}: download "
                            "the two reports by hand and run  python run.py --date ... --file A --file B")
-    _field(page, "Date").locator("xpath=./*[last()]").click()
-    page.wait_for_timeout(700)
-    item = _visible(page, preset)
+    _click(page, _field(page, "Date").locator("xpath=./*[last()]"), log)
+    item = _wait_visible(page, preset, 10)
     if item is None:
         raise RuntimeError(f"Date picker has no '{preset}' entry")
-    item.click()
-    page.wait_for_timeout(500)
-    done = _visible(page, "Done")
+    _click(page, item, log)
+    done = _wait_visible(page, "Done", 3)
     if done:
-        done.click()
+        _click(page, done, log)
     page.wait_for_timeout(700)
 
 
@@ -214,18 +246,18 @@ def download_reports(day: date, cfg, headless=True, log=print):
                 _switch_account(page, account, cfg["accounts"], log)
                 step = f"open Other Reports (account {n})"
                 _dismiss_tours(page, log)
-                _open_other_reports(page)
+                _open_other_reports(page, log)
                 for label, option in cfg["report"].items():
                     step = f"set '{label}' (account {n})"
                     _dismiss_tours(page, log)
                     _choose(page, label, option, log)
                 step = f"set Date (account {n})"
                 _dismiss_tours(page, log)
-                _set_date(page, day, today)
+                _set_date(page, day, today, log)
                 step = f"Download (account {n})"
                 _dismiss_tours(page, log)
                 with page.expect_download(timeout=180_000) as dl:
-                    page.get_by_role("button", name=re.compile(r"Download")).first.click()
+                    _click(page, page.get_by_role("button", name=re.compile(r"Download")).first, log)
                 suffix = Path(dl.value.suggested_filename).suffix or ".csv"
                 dest = OUT / f"fsn_{day.isoformat()}_{n}{suffix}"
                 dl.value.save_as(dest)
