@@ -57,12 +57,44 @@ def _on_login_page(page):
     return "/login" in page.url or page.locator("input[type='password']:visible").count() > 0
 
 
-def _ensure_signed_in(page, log):
-    page.goto(HOME, wait_until="domcontentloaded", timeout=90_000)
+def page_state(page):
+    """Short description of the page for the public log: no digits, so no ads numbers."""
     try:
-        page.wait_for_load_state("networkidle", timeout=30_000)
+        text = re.sub(r"\s+", " ", page.locator("body").inner_text(timeout=5_000)).strip()
+        text = re.sub(r"\d", "#", text)[:160]
+        login = page.locator("input[type='password']").count() > 0
+        return (f"page '{page.url.split('?')[0].replace(HOME, '/')}' title '{page.title()[:40]}' "
+                f"login-form={login} text: '{text}'")
+    except Exception as e:
+        return f"page state unavailable ({type(e).__name__})"
+
+
+def _wait_dashboard_or_login(page, accounts, seconds=90):
+    """'dashboard' once an account name is shown, 'login' once the login form is shown."""
+    js = """names => {
+        if (document.querySelector("input[type='password']")) return 'login';
+        const t = document.body ? document.body.innerText : '';
+        return names.some(n => t.includes(n)) ? 'dashboard' : '';
+    }"""
+    try:
+        return page.wait_for_function(js, arg=accounts, timeout=seconds * 1000, polling=1000).json_value()
     except PWTimeout:
-        pass
+        return ""
+
+
+def _ensure_signed_in(page, accounts, log):
+    page.goto(HOME, wait_until="domcontentloaded", timeout=90_000)
+    seen = _wait_dashboard_or_login(page, accounts)
+    if seen == "dashboard":
+        return
+    if not seen:
+        page.reload(wait_until="domcontentloaded", timeout=90_000)      # one retry of a slow/blank load
+        seen = _wait_dashboard_or_login(page, accounts)
+        if seen == "dashboard":
+            return
+        if not seen:
+            raise RuntimeError("Flipkart Ads showed neither the dashboard nor the login page within "
+                               "3 minutes: " + page_state(page))
     if not _on_login_page(page):
         return
     email, pwd = os.environ.get("FLIPKART_ADS_EMAIL", ""), os.environ.get("FLIPKART_ADS_PASSWORD", "")
@@ -239,7 +271,7 @@ def download_reports(day: date, cfg, headless=True, log=print):
         page = ctx.new_page()
         step = "sign in"
         try:
-            _ensure_signed_in(page, log)
+            _ensure_signed_in(page, cfg["accounts"], log)
             for n, account in enumerate(cfg["accounts"], start=1):
                 step = f"switch to account {n}"
                 _dismiss_tours(page, log)
@@ -273,8 +305,9 @@ def download_reports(day: date, cfg, headless=True, log=print):
                     (OUT / "failure.html").write_text(page.content(), encoding="utf-8")
             except Exception:
                 pass
-            first = (str(e).splitlines() or [""])[0]
-            raise RuntimeError(f"Flipkart step '{step}' failed: {type(e).__name__}: {first}") from e
+            first = (str(e).splitlines() or [""])[0][:200]
+            state = "" if "page '" in first else " | " + page_state(page)
+            raise RuntimeError(f"Flipkart step '{step}' failed: {type(e).__name__}: {first}{state}") from e
         finally:
             ctx.close()
             browser.close()

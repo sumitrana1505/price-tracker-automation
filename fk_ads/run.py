@@ -77,6 +77,6 @@ if __name__ == "__main__":
             raise
         except Exception as e:
             msg = str(e).splitlines()
-            text = f"FAILED: {type(e).__name__}: {msg[0][:300] if msg else ''}"
+            text = f"FAILED: {type(e).__name__}: {msg[0][:700] if msg else ''}"
             print(f"::error title=FK_Ads_data::{text}")
             sys.exit(text)
