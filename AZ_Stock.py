@@ -762,6 +762,20 @@ def main():
         for reason in sorted(set(str(p)[:70] for p in problems))[:10]:
             print(f"    - {reason}")
 
+    # On GitHub, also publish the summary as annotations: those are readable on the
+    # run page (and via the API) without signing in, unlike the raw log.
+    if os.getenv("GITHUB_ACTIONS") == "true":
+        per_city = {}
+        for (_, c_name), res in results_dict.items():
+            per_city.setdefault(c_name, {"Yes": 0, "No": 0, "Check": 0})[_sheet_value(res)] += 1
+        city_line = "; ".join(f"{c} {v['Yes']}/{v['No']}/{v['Check']}" for c, v in per_city.items())
+        print(f"::notice title=Stock results::Yes={counts.get('Yes', 0)} No={counts.get('No', 0)} "
+              f"Check={counts.get('Check', 0) + missing} of {total_tasks} checks ({total_time/60:.1f} min)")
+        print(f"::notice title=Per city (Yes/No/Check)::{city_line}")
+        if problems:
+            reasons = " | ".join(sorted(set(str(p)[:70] for p in problems))[:8])
+            print(f"::warning title=Check reasons::{reasons}")
+
     if DRY_RUN:
         print("\nDRY_RUN: nothing written to Excel or Google Sheet.")
         return
