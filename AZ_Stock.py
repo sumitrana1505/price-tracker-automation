@@ -9,6 +9,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
+import re
 import time
 import random
 import openpyxl
@@ -31,6 +32,10 @@ SCOPES = [
 ]
 
 MAX_PARALLEL_CITIES = 4
+PINCODE_RETRIES = 3
+
+# DRY_RUN=1: scrape and print only; do not touch the Excel files or the Google Sheet.
+DRY_RUN = os.getenv("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 
 print_lock = threading.Lock()
 progress_counter = multiprocessing.Value('i', 0)
@@ -149,31 +154,83 @@ def set_pincode_via_api(page, pincode):
         return False, ""
 
 
-def check_stock(page, url):
+LOCATION_SELECTORS = (
+    "#glow-ingress-block",
+    "#contextualIngressPtLabel_deliveryShortLine",
+)
+
+STOCK_READY_SELECTOR = (
+    "#availability, #outOfStock, #add-to-cart-button, #buy-now-button, #buybox, "
+    "#mir-layout-DELIVERY_BLOCK, #deliveryBlockMessage, #buybox-see-all-buying-choices"
+)
+
+
+def get_page_pincode(page):
+    """Return the 6-digit pincode the page is actually showing stock for (or None)."""
+    for selector in LOCATION_SELECTORS:
+        try:
+            loc = page.locator(selector)
+            if loc.count() == 0:
+                continue
+            text = loc.first.text_content(timeout=1500) or ""
+            match = re.search(r"\b(\d{6})\b", text)
+            if match:
+                return match.group(1)
+        except:
+            pass
+    return None
+
+
+def wait_for_product_page(page):
+    try:
+        page.wait_for_selector(STOCK_READY_SELECTOR, timeout=10000)
+    except:
+        pass
+    try:
+        page.wait_for_selector(", ".join(LOCATION_SELECTORS), timeout=5000)
+    except:
+        pass
+
+
+def is_blocked(page):
+    title = page.title().lower()
+    if any(phrase in title for phrase in ("robot check", "captcha", "automated access")):
+        return True
+    try:
+        body_text = page.locator("body").text_content(timeout=2000) or ""
+        if any(phrase in body_text.lower() for phrase in BLOCKED_PHRASES):
+            return True
+    except:
+        pass
+    return False
+
+
+def check_stock(page, url, pincode):
     try:
         time.sleep(random.uniform(0.3, 0.8))
 
         page.goto(normalize_amazon_url(url), wait_until="domcontentloaded", timeout=45000)
-
-        try:
-            page.wait_for_selector(
-                "#availability, #outOfStock, #add-to-cart-button, #buy-now-button, #buybox, #mir-layout-DELIVERY_BLOCK, #deliveryBlockMessage, #buybox-see-all-buying-choices",
-                timeout=10000,
-            )
-        except:
-            pass
+        wait_for_product_page(page)
 
         # 1. Check Bot Block / CAPTCHA
-        title = page.title().lower()
-        if any(phrase in title for phrase in ("robot check", "captcha", "automated access")):
+        if is_blocked(page):
             return "blocked by Amazon"
 
-        try:
-            body_text = page.locator("body").text_content(timeout=2000) or ""
-            if any(phrase in body_text.lower() for phrase in BLOCKED_PHRASES):
+        # 1b. The glow API can report success while the page keeps showing the
+        # IP-based default location. Only trust the page when it shows OUR pincode.
+        shown = get_page_pincode(page)
+        for _ in range(PINCODE_RETRIES):
+            if shown == pincode:
+                break
+            set_pincode_via_api(page, pincode)
+            time.sleep(1.0)
+            page.reload(wait_until="domcontentloaded", timeout=45000)
+            wait_for_product_page(page)
+            if is_blocked(page):
                 return "blocked by Amazon"
-        except:
-            pass
+            shown = get_page_pincode(page)
+        if shown != pincode:
+            return f"pincode not applied (page shows {shown or 'no location'})"
 
         # 2. Hard OOS: #outOfStock container visible
         try:
@@ -343,17 +400,15 @@ def crawl_city(city_name, pincode, products, results_dict, progress_counter, tot
         pincode_time = time.time() - t1
 
         if not ok:
-            log(f"[{city_name}] Pincode setup failed ({pincode}), skipped")
-            context.close()
-            browser.close()
-            return
-
-        log(f"[{city_name}] {city_detected or pincode} | home {homepage_time:.1f}s | API {pincode_time:.1f}s")
+            # Not fatal: check_stock re-applies and verifies the pincode on every product page.
+            log(f"[{city_name}] Pincode setup on homepage failed ({pincode}), will retry on product pages")
+        else:
+            log(f"[{city_name}] {city_detected or pincode} | home {homepage_time:.1f}s | API {pincode_time:.1f}s")
 
         # Check each product
         for excel_row, model, url in products:
             t2 = time.time()
-            result = check_stock(page, url)
+            result = check_stock(page, url, pincode)
             elapsed = time.time() - t2
             product_times.append(elapsed)
             results_dict[(excel_row, city_name)] = result
@@ -562,6 +617,17 @@ def sync_to_google_sheet(results_dict: Dict, products: List, city_cols: List, ta
         log(f"[GSheet] Error updating Google Sheets: {e}")
 
 
+def _sheet_value(raw_res) -> str:
+    """Yes/No as scraped. Anything else (blocked, pincode not applied, page failed,
+    city crashed) becomes 'Check' so a scrape problem is not recorded as out of stock."""
+    val = str(raw_res or "").strip().lower()
+    if val == "yes":
+        return "Yes"
+    if val == "no":
+        return "No"
+    return "Check"
+
+
 def _build_block_rows(start_row: int, date_str: str, philips_prods: List, coocaa_prods: List, city_cols: List, results_dict: Dict) -> List[List[Any]]:
     """Builds the 18 rows structure matching Stock_availability-AZ template"""
     rows = []
@@ -571,8 +637,7 @@ def _build_block_rows(start_row: int, date_str: str, philips_prods: List, coocaa
         cur_r = start_row + idx
         city_vals = []
         for _, c_name, _ in city_cols:
-            raw_res = results_dict.get((ex_row, c_name), "No")
-            city_vals.append("Yes" if str(raw_res).strip().lower() == "yes" else "No")
+            city_vals.append(_sheet_value(results_dict.get((ex_row, c_name))))
 
         rate_formula = "-%" if "85PQT8101" in model else f'=COUNTIF(D{cur_r}:R{cur_r},"Yes")/15'
         rows.append([date_str, url, model] + city_vals + [rate_formula, "", ""])
@@ -592,8 +657,7 @@ def _build_block_rows(start_row: int, date_str: str, philips_prods: List, coocaa
         cur_r = c_block_start + idx
         city_vals = []
         for _, c_name, _ in city_cols:
-            raw_res = results_dict.get((ex_row, c_name), "No")
-            city_vals.append("Yes" if str(raw_res).strip().lower() == "yes" else "No")
+            city_vals.append(_sheet_value(results_dict.get((ex_row, c_name))))
 
         rate_formula = f'=COUNTIF(D{cur_r}:R{cur_r},"Yes")/15'
         if idx == 1:  # 55Y74 Pro holds AZ TOTAL
@@ -684,6 +748,23 @@ def main():
     print(f"  Total checks: {total_tasks}")
     print(f"  Average speed: {total_time/total_tasks:.1f}s/check")
     print(f"{'='*60}")
+
+    counts = {}
+    for res in results_dict.values():
+        key = _sheet_value(res)
+        counts[key] = counts.get(key, 0) + 1
+    missing = total_tasks - len(results_dict)
+    print(f"  Results: Yes={counts.get('Yes', 0)}  No={counts.get('No', 0)}  "
+          f"Check={counts.get('Check', 0) + missing}")
+    problems = [r for r in results_dict.values() if _sheet_value(r) == "Check"]
+    if problems:
+        print("  'Check' reasons (sample):")
+        for reason in sorted(set(str(p)[:70] for p in problems))[:10]:
+            print(f"    - {reason}")
+
+    if DRY_RUN:
+        print("\nDRY_RUN: nothing written to Excel or Google Sheet.")
+        return
 
     # Write back to ourmodels_pincode.xlsx
     for row_idx in range(3, ws.max_row + 1):
