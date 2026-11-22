@@ -541,6 +541,7 @@ def sync_to_google_sheet(results_dict: Dict, products: List, city_cols: List, ta
                               "startColumnIndex": 18, "endColumnIndex": 19},
                     "cell": {"userEnteredFormat": {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}}},
                     "fields": "userEnteredFormat.numberFormat"}},
+                _black_borders(ws.id, sum_row - 1, sum_row, 16, 19),
                 {"repeatCell": {
                     "range": {"sheetId": ws.id, "startRowIndex": sep_row - 1, "endRowIndex": sep_row},
                     "cell": {"userEnteredFormat": {"backgroundColor": blue}},
@@ -560,6 +561,7 @@ def sync_to_google_sheet(results_dict: Dict, products: List, city_cols: List, ta
             ws.add_rows(end_row - ws.row_count + 100)
 
         # Batch write to Google Sheet with USER_ENTERED so formulas are evaluated
+        date_end_row = start_row - 1 + sum(1 for r in rows_to_insert if r[0])  # last row with a date
         range_target = f"A{start_row}:U{end_row}"
         ws.update(range_name=range_target, values=rows_to_insert, value_input_option="USER_ENTERED")
         log(f"[GSheet] Successfully wrote {len(rows_to_insert)} rows to '{ws_name}' at range {range_target}")
@@ -620,23 +622,29 @@ def sync_to_google_sheet(results_dict: Dict, products: List, city_cols: List, ta
                         "fields": "userEnteredFormat.numberFormat"
                     }
                 },
+                # Column A (date) yellow + bold on every row that carries the date
                 {
-                    "updateBorders": {
+                    "repeatCell": {
                         "range": {
                             "sheetId": ws.id,
                             "startRowIndex": start_row - 1,
-                            "endRowIndex": end_row,
+                            "endRowIndex": date_end_row,
                             "startColumnIndex": 0,
-                            "endColumnIndex": 21
+                            "endColumnIndex": 1
                         },
-                        "top": {"style": "SOLID", "width": 1, "color": {"red": 0.8, "green": 0.8, "blue": 0.8}},
-                        "bottom": {"style": "SOLID", "width": 1, "color": {"red": 0.8, "green": 0.8, "blue": 0.8}},
-                        "left": {"style": "SOLID", "width": 1, "color": {"red": 0.8, "green": 0.8, "blue": 0.8}},
-                        "right": {"style": "SOLID", "width": 1, "color": {"red": 0.8, "green": 0.8, "blue": 0.8}},
-                        "innerHorizontal": {"style": "SOLID", "width": 1, "color": {"red": 0.85, "green": 0.85, "blue": 0.85}},
-                        "innerVertical": {"style": "SOLID", "width": 1, "color": {"red": 0.85, "green": 0.85, "blue": 0.85}}
+                        "cell": {
+                            "userEnteredFormat": {
+                                "backgroundColor": {"red": 1, "green": 1, "blue": 0},
+                                "textFormat": {"bold": True, "fontSize": 10, "fontFamily": "Calibri"}
+                            }
+                        },
+                        "fields": "userEnteredFormat(backgroundColor,textFormat)"
                     }
                 },
+                # Black borders on all sides of every cell: date/link/model, Yes/No grid, rate (A:S)
+                _black_borders(ws.id, start_row - 1, date_end_row, 0, 19),
+                # ...and around the AZ - Coocaa label + rate (Q:S)
+                _black_borders(ws.id, date_end_row, end_row - 1, 16, 19),
                 {
                     # Last row of the block = blank separator, blue (#4A86E8) across the whole row
                     "repeatCell": {
@@ -662,6 +670,19 @@ def sync_to_google_sheet(results_dict: Dict, products: List, city_cols: List, ta
 
     except Exception as e:
         log(f"[GSheet] Error updating Google Sheets: {e}")
+
+
+def _black_borders(sheet_id: int, row_start: int, row_end: int, col_start: int, col_end: int) -> Dict:
+    """updateBorders request: thin black line on every side of every cell in the range (0-based, end exclusive)."""
+    line = {"style": "SOLID", "width": 1, "color": {"red": 0, "green": 0, "blue": 0}}
+    return {
+        "updateBorders": {
+            "range": {"sheetId": sheet_id, "startRowIndex": row_start, "endRowIndex": row_end,
+                      "startColumnIndex": col_start, "endColumnIndex": col_end},
+            "top": line, "bottom": line, "left": line, "right": line,
+            "innerHorizontal": line, "innerVertical": line,
+        }
+    }
 
 
 def _sheet_value(raw_res) -> str:
