@@ -471,8 +471,9 @@ def sync_to_google_sheet(results_dict: Dict, products: List, city_cols: List, ta
                 if "Stock_availability-AZ" in wb_tmp.sheetnames:
                     ws_tmp = wb_tmp["Stock_availability-AZ"]
                     for r in range(ws_tmp.max_row, 0, -1):
-                        if ws_tmp.cell(r, 1).value or ws_tmp.cell(r, 3).value:
-                            start_row = r + 1
+                        if ws_tmp.cell(r, 1).value or ws_tmp.cell(r, 3).value or ws_tmp.cell(r, 17).value:
+                            ends_block = str(ws_tmp.cell(r, 17).value or "").strip() == "AZ - Coocaa"
+                            start_row = r + 2 if ends_block else r + 1
                             break
             except Exception:
                 pass
@@ -493,21 +494,25 @@ def sync_to_google_sheet(results_dict: Dict, products: List, city_cols: List, ta
             ws.update(range_name="A1:U2", values=[h1, h2], value_input_option="USER_ENTERED")
 
         # Find the last row with data in Stock_availability-AZ
+        # Column Q holds the 'AZ - Coocaa' label, whose row has nothing in A or C.
         col_a = ws.col_values(1)
         col_c = ws.col_values(3)
-        max_len = max(len(col_a), len(col_c))
+        col_q = ws.col_values(17)
+        cols = (col_a, col_c, col_q)
+        max_len = max(len(c) for c in cols)
         last_row = 2
         for idx in range(max_len, 0, -1):
-            va = col_a[idx - 1] if idx <= len(col_a) else ""
-            vc = col_c[idx - 1] if idx <= len(col_c) else ""
-            if (va and str(va).strip()) or (vc and str(vc).strip()):
+            if any(idx <= len(c) and str(c[idx - 1]).strip() for c in cols):
                 last_row = idx
                 break
 
         log(f"[GSheet] Last populated row in '{ws_name}' is {last_row}")
 
+        # A finished block ends with 'AZ - Coocaa' + the blank blue separator row: start after it.
+        last_q = str(col_q[last_row - 1]).strip() if last_row <= len(col_q) else ""
+        start_row = last_row + 2 if last_q == "AZ - Coocaa" else last_row + 1
+
         # Check if today's date block already exists within recent rows to prevent duplicates
-        start_row = last_row + 1
         for check_r in range(max(3, last_row - 25), last_row + 1):
             if check_r <= len(col_a):
                 existing_d = str(col_a[check_r - 1]).strip()
@@ -515,6 +520,34 @@ def sync_to_google_sheet(results_dict: Dict, products: List, city_cols: List, ta
                     start_row = check_r
                     log(f"[GSheet] Found existing block for date '{date_str}' starting at Row {start_row}. Overwriting...")
                     break
+
+        blue = {"red": 74 / 255, "green": 134 / 255, "blue": 232 / 255}
+
+        # Older bot blocks stop at the last Coocaa model row. Close such a block the same way as
+        # the hand-made ones (AZ - Coocaa row + blue separator) before appending the new one.
+        last_c = str(col_c[last_row - 1]).strip() if last_row <= len(col_c) else ""
+        if (start_row > last_row and last_q != "AZ - Coocaa" and coocaa_prods
+                and last_c == str(coocaa_prods[-1][1]).strip()):
+            n = len(coocaa_prods)
+            sum_row, sep_row = last_row + 1, last_row + 2
+            if sep_row > ws.row_count:
+                ws.add_rows(sep_row - ws.row_count + 100)
+            ws.update(range_name=f"Q{sum_row}:S{sum_row}",
+                      values=[["AZ - Coocaa", "", f'=COUNTIF(D{last_row - n + 1}:R{last_row},"Yes")/{n * 15}']],
+                      value_input_option="USER_ENTERED")
+            sh.batch_update({"requests": [
+                {"repeatCell": {
+                    "range": {"sheetId": ws.id, "startRowIndex": sum_row - 1, "endRowIndex": sum_row,
+                              "startColumnIndex": 18, "endColumnIndex": 19},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}}},
+                    "fields": "userEnteredFormat.numberFormat"}},
+                {"repeatCell": {
+                    "range": {"sheetId": ws.id, "startRowIndex": sep_row - 1, "endRowIndex": sep_row},
+                    "cell": {"userEnteredFormat": {"backgroundColor": blue}},
+                    "fields": "userEnteredFormat.backgroundColor"}},
+            ]})
+            log(f"[GSheet] Closed previous block: 'AZ - Coocaa' at Row {sum_row}, blue row {sep_row}")
+            start_row = sep_row + 1
 
         if start_row > last_row:
             log(f"[GSheet] Appending new block for date '{date_str}' at Row {start_row}...")
@@ -603,6 +636,20 @@ def sync_to_google_sheet(results_dict: Dict, products: List, city_cols: List, ta
                         "innerHorizontal": {"style": "SOLID", "width": 1, "color": {"red": 0.85, "green": 0.85, "blue": 0.85}},
                         "innerVertical": {"style": "SOLID", "width": 1, "color": {"red": 0.85, "green": 0.85, "blue": 0.85}}
                     }
+                },
+                {
+                    # Last row of the block = blank separator, blue (#4A86E8) across the whole row
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": ws.id,
+                            "startRowIndex": end_row - 1,
+                            "endRowIndex": end_row,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {"backgroundColor": blue}
+                        },
+                        "fields": "userEnteredFormat.backgroundColor"
+                    }
                 }
             ]
             sh.batch_update({"requests": format_requests})
@@ -670,6 +717,16 @@ def _build_block_rows(start_row: int, date_str: str, philips_prods: List, coocaa
         else:
             row_data = [date_str, url, model] + city_vals + [rate_formula, "", ""]
         rows.append(row_data)
+
+    # 4. Coocaa summary row (label in Q, rate in S, no date) - same as the hand-made blocks
+    if coocaa_prods:
+        c_start = c_block_start
+        c_end = c_block_start + len(coocaa_prods) - 1
+        coocaa_formula = f'=COUNTIF(D{c_start}:R{c_end},"Yes")/{len(coocaa_prods) * 15}'
+        rows.append([""] * 16 + ["AZ - Coocaa", "", coocaa_formula, "", ""])
+
+    # 5. Blank separator row (filled blue in the sheet) between days
+    rows.append([""] * 21)
 
     return rows
 
