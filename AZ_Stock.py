@@ -619,7 +619,7 @@ def sync_to_google_sheet(results_dict: Dict, products: List, city_cols: List, ta
 
 def _sheet_value(raw_res) -> str:
     """Yes/No as scraped. Anything else (blocked, pincode not applied, page failed,
-    city crashed) becomes 'Check' so a scrape problem is not recorded as out of stock."""
+    city crashed) is 'Check' in the run summary/annotations (the sheet itself shows No)."""
     val = str(raw_res or "").strip().lower()
     if val == "yes":
         return "Yes"
@@ -637,7 +637,8 @@ def _build_block_rows(start_row: int, date_str: str, philips_prods: List, coocaa
         cur_r = start_row + idx
         city_vals = []
         for _, c_name, _ in city_cols:
-            city_vals.append(_sheet_value(results_dict.get((ex_row, c_name))))
+            # Sheet format stays Yes/No only; scrape problems are reported in the run annotations.
+            city_vals.append("Yes" if _sheet_value(results_dict.get((ex_row, c_name))) == "Yes" else "No")
 
         rate_formula = "-%" if "85PQT8101" in model else f'=COUNTIF(D{cur_r}:R{cur_r},"Yes")/15'
         rows.append([date_str, url, model] + city_vals + [rate_formula, "", ""])
@@ -657,7 +658,8 @@ def _build_block_rows(start_row: int, date_str: str, philips_prods: List, coocaa
         cur_r = c_block_start + idx
         city_vals = []
         for _, c_name, _ in city_cols:
-            city_vals.append(_sheet_value(results_dict.get((ex_row, c_name))))
+            # Sheet format stays Yes/No only; scrape problems are reported in the run annotations.
+            city_vals.append("Yes" if _sheet_value(results_dict.get((ex_row, c_name))) == "Yes" else "No")
 
         rate_formula = f'=COUNTIF(D{cur_r}:R{cur_r},"Yes")/15'
         if idx == 1:  # 55Y74 Pro holds AZ TOTAL
