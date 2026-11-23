@@ -36,7 +36,7 @@ from config import (
     SUB_HEADERS,
     format_today_header,
 )
-from scrapers import FlipkartScraper, AmazonScraper, ProductScrapedData
+from scrapers import FlipkartScraper, AmazonScraper, ProductScrapedData, report_flipkart_failures
 
 logger = logging.getLogger("GoogleSheetsBrain")
 logging.basicConfig(
@@ -109,6 +109,7 @@ class GoogleSheetPriceTrackerBrain:
         self.date_header = date_header or format_today_header()
         self.client = get_gspread_client()
         self.fk_scraper = FlipkartScraper()
+        self.channel_failed = False     # True when a whole channel could not be fetched
         self.amz_scraper = AmazonScraper()
 
     def run_sheet(self, sh, ws, test_limit: Optional[int] = None):
@@ -262,7 +263,9 @@ class GoogleSheetPriceTrackerBrain:
         # Fetch every Amazon product of this sheet concurrently up front (mobile site,
         # Mumbai -> Bangalore/Delhi/Hyderabad -> remaining pincodes). The loop below then
         # only reads the stored results.
+        # Flipkart products are fetched up front as well, with retry rounds for refused ones.
         amazon_links = []
+        flipkart_links = []
         counted = 0
         for r in range(FIRST_DATA_ROW, min(last_data_row + 1, len(all_rows) + 1)):
             row_data = all_rows[r - 1]
@@ -274,11 +277,13 @@ class GoogleSheetPriceTrackerBrain:
                 break
             counted += 1
             if "flipkart" in ch_l or "flipkart" in lnk:
-                continue
-            if "amazon" in ch_l or "amazon" in lnk:
+                flipkart_links.append(lnk)
+            elif "amazon" in ch_l or "amazon" in lnk:
                 amazon_links.append(lnk)
         if amazon_links and hasattr(self.amz_scraper, "prefetch"):
             self.amz_scraper.prefetch(amazon_links)
+        if flipkart_links and hasattr(self.fk_scraper, "prefetch"):
+            self.fk_scraper.prefetch(flipkart_links)
 
         for r in range(FIRST_DATA_ROW, min(last_data_row + 1, len(all_rows) + 1)):
             row_data = all_rows[r - 1] if (r - 1) < len(all_rows) else []
@@ -403,6 +408,8 @@ class GoogleSheetPriceTrackerBrain:
         logger.info(f"  Successful: {success_count} | OOS/Failed: {fail_count}")
         logger.info(f"  Elapsed: {elapsed:.1f}s ({elapsed/60:.1f} mins)")
         logger.info("=" * 60)
+        if flipkart_links and report_flipkart_failures(self.fk_scraper, flipkart_links, ws.title):
+            self.channel_failed = True
 
     def highlight_price_changes(self, sh, ws, start_col: int, row2: List[str], all_rows: List[List[str]],
                                 today_prices: Dict[int, int], last_data_row: int):

@@ -3,8 +3,10 @@ Scraper Module for Flipkart and Amazon India Product Pages
 Extracts: Price, Bank Offers / Cashback, Coupons, Ratings, and Ratings Count.
 """
 
+import copy
 import json
 import logging
+import os
 import random
 import re
 import sys
@@ -124,8 +126,19 @@ class FlipkartScraper:
 
     RETRY_PROFILES = ("chrome131", "chrome131_android", "safari17_0")
 
+    # prefetch(): products Flipkart refused are tried again in later rounds
+    ROUNDS = 3                 # first pass + 2 retry rounds
+    ROUND_PAUSE = 45           # seconds between rounds
+    STREAK_LIMIT = 12          # this many refusals in a row = Flipkart is blocking us right now
+    STREAK_PAUSE = 60          # ... then pause, start a fresh session and carry on
+    MAX_STREAK_PAUSES = 2      # per round; after that the rest of the round is skipped
+
     def __init__(self, pincode: str = DEFAULT_PINCODE):
         self.pincode = pincode
+        self._cache: Dict[str, ProductScrapedData] = {}
+        self._new_session()
+
+    def _new_session(self):
         if curl_requests:
             self.session = curl_requests.Session(impersonate="chrome120")
         else:
@@ -133,6 +146,78 @@ class FlipkartScraper:
             self.session.headers.update(self.HEADERS)
 
     def scrape(self, url: str, model: str = "") -> ProductScrapedData:
+        """Result for one product: from prefetch() when it was fetched there, else fetched now."""
+        cached = self._cache.get(url)
+        if cached is not None:
+            data = copy.copy(cached)
+            data.model = model
+            return data
+        return self._scrape_live(url, model)
+
+    def prefetch(self, urls: List[str]) -> None:
+        """
+        Fetches all given Flipkart links up front, one by one, and keeps the results for scrape().
+        Products whose page could not be read (refused / blocked / timeout) are retried in up
+        to two more rounds after a pause, each with a fresh session. When Flipkart refuses many
+        products in a row the run pauses instead of burning time on certain failures.
+        """
+        todo = [u for u in dict.fromkeys(urls) if u and u not in self._cache]
+        if not todo:
+            return
+        total = len(todo)
+        t0 = time.time()
+        logger.info(f"[Flipkart] Fetching {total} products...")
+        for round_no in range(1, self.ROUNDS + 1):
+            if not todo:
+                break
+            if round_no > 1:
+                logger.info(f"[Flipkart] Round {round_no}: retrying {len(todo)} products Flipkart did "
+                            f"not answer, after a {self.ROUND_PAUSE}s pause...")
+                time.sleep(self.ROUND_PAUSE)
+                self._new_session()
+            failed: List[str] = []
+            streak = pauses = 0
+            for i, url in enumerate(todo):
+                data = self._scrape_live(url)
+                self._cache[url] = data
+                if not data.fetch_error:
+                    streak = 0
+                    continue
+                failed.append(url)
+                streak += 1
+                if streak < self.STREAK_LIMIT:
+                    continue
+                if pauses >= self.MAX_STREAK_PAUSES:
+                    rest = todo[i + 1:]
+                    logger.warning(f"[Flipkart] Still refused after {pauses} pauses ({data.error_msg}); "
+                                   f"skipping the other {len(rest)} products this round.")
+                    for u in rest:
+                        self._cache[u] = ProductScrapedData(channel="Flipkart", url=u, in_stock=False,
+                                                            fetch_error=True, error_msg=data.error_msg)
+                    failed.extend(rest)
+                    break
+                pauses += 1
+                logger.warning(f"[Flipkart] {streak} products refused in a row ({data.error_msg}); "
+                               f"pausing {self.STREAK_PAUSE}s with a fresh session...")
+                time.sleep(self.STREAK_PAUSE)
+                self._new_session()
+                streak = 0
+            logger.info(f"[Flipkart] Round {round_no}: {len(todo) - len(failed)} of {len(todo)} fetched")
+            todo = failed
+        ok = sum(1 for u in dict.fromkeys(urls) if u in self._cache and not self._cache[u].fetch_error)
+        logger.info(f"[Flipkart] Fetched {ok} of {total} products in {time.time() - t0:.0f}s")
+
+    def failure_report(self, urls: List[str]) -> Tuple[int, int, Dict[str, int]]:
+        """(products, not fetched, {reason: count}) for the given links."""
+        urls = [u for u in dict.fromkeys(urls) if u]
+        reasons: Dict[str, int] = {}
+        for u in urls:
+            d = self._cache.get(u)
+            if d is not None and d.fetch_error:
+                reasons[d.error_msg or "unknown"] = reasons.get(d.error_msg or "unknown", 0) + 1
+        return len(urls), sum(reasons.values()), reasons
+
+    def _scrape_live(self, url: str, model: str = "") -> ProductScrapedData:
         data = ProductScrapedData(model=model, channel="Flipkart", url=url)
         
         # Jitter delay before request
@@ -171,11 +256,21 @@ class FlipkartScraper:
                 time.sleep(attempt * 1.5)
 
         if not resp or resp.status_code != 200:
+            # Flipkart refused / never answered: NOT an out-of-stock product
             data.in_stock = False
+            data.fetch_error = True
             data.error_msg = f"HTTP {resp.status_code}" if resp is not None else f"No response ({last_exc or 'unknown'})"
             return data
 
-        page_text = resp.text
+        data = self._parse_page(resp.text, url, data)
+        if data.price is None and data.rating is None and data.in_stock:
+            # page came back but holds no product data (block / captcha / error page)
+            data.fetch_error = True
+            data.in_stock = False
+            data.error_msg = data.error_msg or "page had no product data"
+        return data
+
+    def _parse_page(self, page_text: str, url: str, data: ProductScrapedData) -> ProductScrapedData:
 
         # Extract __INITIAL_STATE__
         m = re.search(r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\});\s*(?:</script>|\n)', page_text)
@@ -320,6 +415,24 @@ class FlipkartScraper:
         rc_match = re.search(r'([\d,]+)\s+Ratings\b', html_text)
         if rc_match:
             data.rating_count = clean_digits(rc_match.group(1))
+
+
+def report_flipkart_failures(fk: "FlipkartScraper", urls: List[str], sheet_title: str) -> bool:
+    """
+    Logs how many Flipkart products could not be fetched and why - also as a warning/error
+    box on the GitHub run page. Returns True when none of them could be fetched.
+    """
+    total, failed, reasons = fk.failure_report(urls)
+    if not total or not failed:
+        return False
+    why = ", ".join(f"{k} x{v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1]))
+    whole = failed == total
+    text = (f"[{sheet_title}] Flipkart: {failed} of {total} products could not be fetched ({why}). "
+            f"Their Price cells were left blank, not marked OOS.")
+    (logger.error if whole else logger.warning)(text)
+    if os.getenv("GITHUB_ACTIONS"):
+        print(f"::{'error' if whole else 'warning'} title=Flipkart not fetched::{text}", flush=True)
+    return whole
 
 
 # ─────────────────────────────────────────────────────────────

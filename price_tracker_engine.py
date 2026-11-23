@@ -42,7 +42,7 @@ from config import (
     SUB_HEADERS,
     format_today_header,
 )
-from scrapers import FlipkartScraper, AmazonScraper, ProductScrapedData
+from scrapers import FlipkartScraper, AmazonScraper, ProductScrapedData, report_flipkart_failures
 from gdrive_sync import GoogleDriveSync
 
 # Setup logging
@@ -187,7 +187,9 @@ class PriceTrackerBrain:
         # Fetch every Amazon product of this sheet concurrently up front (mobile site,
         # Mumbai -> Bangalore/Delhi/Hyderabad -> remaining pincodes). The loop below then
         # only reads the stored results.
+        # Flipkart products are fetched up front as well, with retry rounds for refused ones.
         amazon_links = []
+        flipkart_links = []
         counted = 0
         for item in rows_to_process:
             lnk = item["link"]
@@ -200,11 +202,13 @@ class PriceTrackerBrain:
             counted += 1
             ch_l = item["channel"].lower()
             if "flipkart" in ch_l or "flipkart" in lnk:
-                continue
-            if "amazon" in ch_l or "amazon" in lnk:
+                flipkart_links.append(lnk)
+            elif "amazon" in ch_l or "amazon" in lnk:
                 amazon_links.append(lnk)
         if amazon_links and hasattr(self.amz_scraper, "prefetch"):
             self.amz_scraper.prefetch(amazon_links)
+        if flipkart_links and hasattr(self.fk_scraper, "prefetch"):
+            self.fk_scraper.prefetch(flipkart_links)
 
         for item in rows_to_process:
             r = item["row"]
@@ -302,6 +306,8 @@ class PriceTrackerBrain:
 
         elapsed = time.time() - t0
         logger.info(f"[{ws.title}] CRAWL COMPLETE: Processed {processed_count} (Success: {success_count}, Failed/OOS: {fail_count}) in {elapsed:.1f}s")
+        if flipkart_links:
+            report_flipkart_failures(self.fk_scraper, flipkart_links, ws.title)
 
     def highlight_price_changes(self, ws, col_price: int, today_prices: Dict[int, int], last_row: int):
         """
@@ -441,6 +447,9 @@ def main():
         logger.info("=" * 60)
         gsheet_brain = GoogleSheetPriceTrackerBrain(spreadsheet_id=spreadsheet_id, date_header=target_date)
         gsheet_brain.run(target_sheets=target_sheets, test_limit=test_limit)
+        if gsheet_brain.channel_failed:
+            # make the GitHub run show as failed instead of ending green with empty cells
+            sys.exit("No Flipkart product could be fetched - see the error above.")
         return
 
     target_file = args.file or resolve_default_file()
