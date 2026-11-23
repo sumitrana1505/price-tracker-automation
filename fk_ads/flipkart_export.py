@@ -41,6 +41,8 @@ def load_state():
             assert state.get("cookies")
             return state
         except Exception:
+            if os.environ.get("FLIPKART_ADS_EMAIL") and os.environ.get("FLIPKART_ADS_PASSWORD"):
+                return None                           # broken session secret: sign in with the password
             raise LoginExpired("The FLIPKART_ADS_STORAGE_STATE secret is not valid - paste the WHOLE "
                                "content of flipkart_state.b64.txt into it, nothing else.")
     if STATE_FILE.exists():
@@ -100,16 +102,21 @@ def _ensure_signed_in(page, accounts, log):
     email, pwd = os.environ.get("FLIPKART_ADS_EMAIL", ""), os.environ.get("FLIPKART_ADS_PASSWORD", "")
     if not (email and pwd):
         raise LoginExpired("Flipkart Ads asked for sign-in - the saved session is no longer accepted. "
-                           "Run save_login.py again and update the FLIPKART_ADS_STORAGE_STATE secret.")
+                           "Add the FLIPKART_ADS_EMAIL and FLIPKART_ADS_PASSWORD secrets (automatic "
+                           "sign-in), or run save_login.py again and update FLIPKART_ADS_STORAGE_STATE.")
     log("Saved session not accepted - signing in with FLIPKART_ADS_EMAIL / FLIPKART_ADS_PASSWORD")
-    page.get_by_placeholder("Enter email").fill(email)
-    page.get_by_placeholder("Enter password").fill(pwd)
+    page.get_by_placeholder("Enter email").first.fill(email)
+    page.get_by_placeholder("Enter password").first.fill(pwd)
     page.locator("button[type='submit']").first.click()
+    # signed in only once the dashboard shows an account name; an OTP / verification page,
+    # a CAPTCHA or "wrong password" leaves us elsewhere - say what Flipkart showed (digits masked)
+    js = "names => names.some(n => (document.body ? document.body.innerText : '').includes(n))"
     try:
-        page.wait_for_url(lambda u: "/login" not in u, timeout=60_000)
+        page.wait_for_function(js, arg=accounts, timeout=90_000, polling=1000)
     except PWTimeout:
-        raise LoginExpired("Sign-in with FLIPKART_ADS_EMAIL / FLIPKART_ADS_PASSWORD did not go through "
-                           "(wrong password, OTP or CAPTCHA) - run save_login.py instead.")
+        raise LoginExpired("Sign-in with FLIPKART_ADS_EMAIL / FLIPKART_ADS_PASSWORD did not reach the "
+                           "dashboard (wrong password, OTP or CAPTCHA?): " + page_state(page))
+    log("Signed in with email / password")
 
 
 def _visible(page, text):
